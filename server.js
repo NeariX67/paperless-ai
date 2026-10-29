@@ -210,8 +210,9 @@ async function processDocument(doc, existingTags, existingCorrespondentList, exi
     content = content.substring(0, 50000);
   }
 
-  const aiService = AIServiceFactory.getService();
-  const analysis = await aiService.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id);
+  const analysis = await AIServiceFactory.execute(service =>
+    service.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id)
+  );
   console.log('Repsonse from AI service:', analysis);
   if (analysis.error) {
     throw new Error(`[ERROR] Document analysis failed: ${analysis.error}`);

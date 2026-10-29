@@ -7,6 +7,7 @@ const ollamaService = require('../services/ollamaService.js');
 const azureService = require('../services/azureService.js');
 const documentModel = require('../models/document.js');
 const AIServiceFactory = require('../services/aiServiceFactory');
+const providerRegistry = require('../services/providerRegistry');
 const debugService = require('../services/debugService.js');
 const configFile = require('../config/config.js');
 const ChatService = require('../services/chatService.js');
@@ -1594,15 +1595,19 @@ async function processDocument(doc, existingTags, existingCorrespondentList, exi
     }
   }
 
-  const aiService = AIServiceFactory.getService();
   let analysis;
-  if(customPrompt) {
-    console.log('[DEBUG] Starting document analysis with custom prompt');
-    analysis = await aiService.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id, customPrompt, options);
-  }else{
-    analysis = await aiService.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id, null, options);
+  const runAnalysis = (service) => {
+    return customPrompt
+      ? service.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id, customPrompt, options)
+      : service.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id, null, options);
+  };
+  try {
+    analysis = await AIServiceFactory.execute(runAnalysis);
+  } catch (error) {
+    console.error(`[ERROR] Document analysis failed: ${error.message}`);
+    analysis = { error: error.message };
   }
-  console.log('Repsonse from AI service:', analysis);
+  console.log('Response from AI service:', analysis);
   if (analysis.error) {
     throw new Error(`[ERROR] Document analysis failed: ${analysis.error}`);
   }
@@ -2713,7 +2718,9 @@ router.get('/settings', async (req, res) => {
     EXTERNAL_API_HEADERS: process.env.EXTERNAL_API_HEADERS || '{}',
     EXTERNAL_API_BODY: process.env.EXTERNAL_API_BODY || '{}',
     EXTERNAL_API_TIMEOUT: process.env.EXTERNAL_API_TIMEOUT || '5000',
-    EXTERNAL_API_TRANSFORM: process.env.EXTERNAL_API_TRANSFORM || ''
+    EXTERNAL_API_TRANSFORM: process.env.EXTERNAL_API_TRANSFORM || '',
+    PROVIDERS: await providerRegistry.getProviders(),
+    PROVIDER_HEALTH: providerRegistry.getHealth()
   };
   
   if (isConfigured) {
@@ -3038,27 +3045,18 @@ router.post('/manual/analyze', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'Valid content string is required' });
     }
 
-    if (process.env.AI_PROVIDER === 'openai') {
-      const analyzeDocument = await openaiService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
+    const analyzeDocument = await AIServiceFactory.execute(service =>
+      service.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || [])
+    );
+    if (analyzeDocument.metrics) {
       await documentModel.addOpenAIMetrics(
-            id, 
-            analyzeDocument.metrics.promptTokens,
-            analyzeDocument.metrics.completionTokens,
-            analyzeDocument.metrics.totalTokens
-          )
-      return res.json(analyzeDocument);
-    } else if (process.env.AI_PROVIDER === 'ollama') {
-      const analyzeDocument = await ollamaService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
-      return res.json(analyzeDocument);
-    } else if (process.env.AI_PROVIDER === 'custom') {
-      const analyzeDocument = await customService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
-      return res.json(analyzeDocument);
-    } else if (process.env.AI_PROVIDER === 'azure') {
-      const analyzeDocument = await azureService.analyzeDocument(content, existingTagsList, existingCorrespondentList, existingDocumentTypesList, id || []);
-      return res.json(analyzeDocument);
-    } else {
-      return res.status(500).json({ error: 'AI provider not configured' });
+        id,
+        analyzeDocument.metrics.promptTokens,
+        analyzeDocument.metrics.completionTokens,
+        analyzeDocument.metrics.totalTokens
+      );
     }
+    return res.json(analyzeDocument);
   } catch (error) {
     console.error('Analysis error:', error);
     return res.status(500).json({ error: error.message });
@@ -3150,39 +3148,18 @@ router.post('/manual/playground', express.json(), async (req, res) => {
       return res.status(400).json({ error: 'Valid content string is required' });
     }
 
-    if (process.env.AI_PROVIDER === 'openai') {
-      const analyzeDocument = await openaiService.analyzePlayground(content, prompt);
+    const analyzeDocument = await AIServiceFactory.execute(service =>
+      service.analyzePlayground(content, prompt)
+    );
+    if (analyzeDocument.metrics) {
       await documentModel.addOpenAIMetrics(
-        documentId, 
+        documentId,
         analyzeDocument.metrics.promptTokens,
         analyzeDocument.metrics.completionTokens,
         analyzeDocument.metrics.totalTokens
-      )
-      return res.json(analyzeDocument);
-    } else if (process.env.AI_PROVIDER === 'ollama') {
-      const analyzeDocument = await ollamaService.analyzePlayground(content, prompt);
-      return res.json(analyzeDocument);
-    } else if (process.env.AI_PROVIDER === 'custom') {
-      const analyzeDocument = await customService.analyzePlayground(content, prompt);
-      await documentModel.addOpenAIMetrics(
-        documentId, 
-        analyzeDocument.metrics.promptTokens,
-        analyzeDocument.metrics.completionTokens,
-        analyzeDocument.metrics.totalTokens
-      )
-      return res.json(analyzeDocument);
-    } else if (process.env.AI_PROVIDER === 'azure') {
-      const analyzeDocument = await azureService.analyzePlayground(content, prompt);
-      await documentModel.addOpenAIMetrics(
-        documentId, 
-        analyzeDocument.metrics.promptTokens,
-        analyzeDocument.metrics.completionTokens,
-        analyzeDocument.metrics.totalTokens
-      )
-      return res.json(analyzeDocument);
-    } else {
-      return res.status(500).json({ error: 'AI provider not configured' });
+      );
     }
+    return res.json(analyzeDocument);
   } catch (error) {
     console.error('Analysis error:', error);
     return res.status(500).json({ error: error.message });
@@ -4025,7 +4002,8 @@ router.post('/settings', express.json(), async (req, res) => {
       azureEndpoint,
       azureApiKey,
       azureDeploymentName,
-      azureApiVersion
+      azureApiVersion,
+      providers
     } = req.body;
 
     //replace equal char in system prompt
@@ -4146,7 +4124,31 @@ router.post('/settings', express.json(), async (req, res) => {
     if (paperlessUsername) updatedConfig.PAPERLESS_USERNAME = paperlessUsername;
 
     // Handle AI provider configuration
-    if (aiProvider) {
+    if (providers) {
+      // Provider chain submitted as JSON by the settings UI: validate each
+      // enabled entry and require at least one reachable provider, then persist
+      // the chain (which mirrors the top-priority entry into env vars).
+      let chain;
+      try {
+        chain = typeof providers === 'string' ? JSON.parse(providers) : providers;
+      } catch (error) {
+        return res.status(400).json({ error: 'Invalid provider chain: expected a JSON array' });
+      }
+      if (!Array.isArray(chain) || !chain.length) {
+        return res.status(400).json({ error: 'Provider chain must contain at least one provider' });
+      }
+      const KNOWN_TYPES = ['openai', 'ollama', 'custom', 'azure'];
+      for (const p of chain) {
+        if (!KNOWN_TYPES.includes(p.type)) {
+          return res.status(400).json({ error: `Unknown provider type '${p.type}'` });
+        }
+      }
+      const anyChainEntryOk = await setupService.validateConfig({ ...currentConfig, providers: chain });
+      if (!anyChainEntryOk) {
+        return res.status(400).json({ error: 'No provider in the chain is reachable' });
+      }
+      await providerRegistry.saveProviders(chain);
+    } else if (aiProvider) {
       updatedConfig.AI_PROVIDER = aiProvider;
       
       if (aiProvider === 'openai' && openaiKey) {
@@ -4380,6 +4382,188 @@ router.get('/dashboard/doc/:id', async (req, res) => {
   } catch (error) {
     console.error('Error fetching document:', error);
     res.status(500).json({ error: 'Failed to fetch document' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/providers:
+ *   get:
+ *     summary: List the provider chain
+ *     description: |
+ *       Returns the priority-ordered provider chain used for AI calls.
+ *       Providers are stored in data/providers.json; when that file does not
+ *       exist the chain contains a single entry derived from the legacy
+ *       environment configuration. Each entry carries the last known health
+ *       status from the circuit breaker.
+ *     tags: [API, Providers]
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Provider chain returned successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 providers:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Provider'
+ *                 health:
+ *                   type: object
+ *                   description: Circuit breaker state keyed by provider id
+ *       500:
+ *         description: Server error occurred while loading providers
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get('/api/providers', async (req, res) => {
+  try {
+    const providers = await providerRegistry.getProviders();
+    const health = providerRegistry.getHealth();
+    res.json({
+      providers: providers.map(p => ({ ...p, health: health[p.id] || null })),
+      health
+    });
+  } catch (error) {
+    console.error('[ERROR] fetching provider chain:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/providers:
+ *   post:
+ *     summary: Save the provider chain
+ *     description: |
+ *       Replaces the provider chain with the submitted list. Entries are
+ *       validated (provider type must be known) and saved to data/providers.json
+ *       in priority order. The top-priority enabled provider is mirrored into
+ *       the legacy environment variables for backward compatibility. The health
+ *       cache is cleared on save.
+ *     tags: [API, Providers]
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [providers]
+ *             properties:
+ *               providers:
+ *                 type: array
+ *                 items:
+ *                   $ref: '#/components/schemas/Provider'
+ *     responses:
+ *       200:
+ *         description: Provider chain saved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 providers:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Provider'
+ *       400:
+ *         description: Invalid provider list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Server error occurred while saving providers
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/api/providers', express.json(), async (req, res) => {
+  try {
+    const { providers } = req.body;
+    const chain = Array.isArray(req.body) ? req.body : providers;
+    const KNOWN_TYPES = ['openai', 'ollama', 'custom', 'azure'];
+    if (!Array.isArray(chain) || !chain.length) {
+      return res.status(400).json({ error: 'At least one provider is required' });
+    }
+    for (const p of chain) {
+      if (!KNOWN_TYPES.includes(p.type)) {
+        return res.status(400).json({ error: `Unknown provider type '${p.type}'` });
+      }
+    }
+    const saved = await providerRegistry.saveProviders(chain);
+    res.json({ success: true, providers: saved });
+  } catch (error) {
+    console.error('[ERROR] saving provider chain:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/providers/test:
+ *   post:
+ *     summary: Test a single provider
+ *     description: |
+ *       Sends a minimal test request to the given provider entry without
+ *       touching the saved chain. The result updates the circuit breaker
+ *       health cache for the provider id when one is supplied.
+ *     tags: [API, Providers]
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/Provider'
+ *     responses:
+ *       200:
+ *         description: Test executed; ok reflects the result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *                 error:
+ *                   type: string
+ *                   nullable: true
+ *       500:
+ *         description: Server error occurred while testing the provider
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/api/providers/test', express.json(), async (req, res) => {
+  try {
+    const entry = req.body;
+    if (!entry || !entry.type) {
+      return res.status(400).json({ error: 'Provider entry is required' });
+    }
+    const result = await providerRegistry.validate(entry);
+    if (entry.id) {
+      result.ok ? providerRegistry.markSuccess(entry) : providerRegistry.markFailure(entry, result.error);
+    }
+    res.json(result);
+  } catch (error) {
+    console.error('[ERROR] testing provider:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 

@@ -1,5 +1,4 @@
 // services/chatService.js
-const OpenAIService = require('./openaiService');
 const PaperlessService = require('./paperlessService');
 const config = require('../config/config');
 const fs = require('fs');
@@ -9,6 +8,7 @@ const stream = require('stream');
 const { promisify } = require('util');
 const pipeline = promisify(stream.pipeline);
 const { OpenAI } = require('openai');
+const providerRegistry = require('./providerRegistry');
 
 class ChatService {
   constructor() {
@@ -117,23 +117,15 @@ class ChatService {
       res.setHeader('Connection', 'keep-alive');
 
       let fullResponse = '';
-      const aiProvider = process.env.AI_PROVIDER;
 
-      if (aiProvider === 'openai') {
-        // Make sure OpenAIService is initialized
-        OpenAIService.initialize();
-        
-        // Always create a new client instance for this request to ensure it works
-        const openai = new OpenAI({
-          apiKey: process.env.OPENAI_API_KEY
-        });
-        
-        const stream = await openai.chat.completions.create({
-          model: process.env.OPENAI_MODEL || 'gpt-4',
+      const streamWithEntry = async (entry) => {
+        const client = providerRegistry.buildClient(entry);
+        const stream = await client.chat.completions.create({
+          model: entry.model,
           messages: chatData.messages,
           stream: true,
         });
-        
+
         for await (const chunk of stream) {
           const content = chunk.choices[0]?.delta?.content || '';
           if (content) {
@@ -141,69 +133,34 @@ class ChatService {
             res.write(`data: ${JSON.stringify({ content })}\n\n`);
           }
         }
-      } else if (aiProvider === 'custom') {
-        // Use OpenAI SDK with custom base URL
-        const customOpenAI = new OpenAI({
-          baseURL: process.env.CUSTOM_BASE_URL,
-          apiKey: process.env.CUSTOM_API_KEY,
-        });
+      };
 
-        const stream = await customOpenAI.chat.completions.create({
-          model: process.env.CUSTOM_MODEL,
-          messages: chatData.messages,
-          stream: true,
-        });
-        
-        for await (const chunk of stream) {
-          const content = chunk.choices[0]?.delta?.content || '';
-          if (content) {
-            fullResponse += content;
-            res.write(`data: ${JSON.stringify({ content })}\n\n`);
-          }
-        }
-      } else if (aiProvider === 'azure') {
-        // Use OpenAI SDK with Azure configuration
-        const azureOpenAI = new OpenAI({
-          apiKey: process.env.AZURE_API_KEY,
-          baseURL: `${process.env.AZURE_ENDPOINT}/openai/deployments/${process.env.AZURE_DEPLOYMENT_NAME}`,
-          defaultQuery: { 'api-version': process.env.AZURE_API_VERSION },
-        });
+      const chain = await providerRegistry.getChain();
+      const errors = [];
+      let attempted = 0;
 
-        const stream = await azureOpenAI.chat.completions.create({
-          model: process.env.AZURE_DEPLOYMENT_NAME,
-          messages: chatData.messages,
-          stream: true,
-        });
-        
-        for await (const chunk of stream) {
-          const content = chunk.choices[0]?.delta?.content || '';
-          if (content) {
-            fullResponse += content;
-            res.write(`data: ${JSON.stringify({ content })}\n\n`);
-          }
+      for (const entry of chain) {
+        if (providerRegistry.isUnhealthy(entry) && attempted > 0) {
+          errors.push(`${entry.name}: skipped (unhealthy)`);
+          continue;
         }
-      } else if (aiProvider === 'ollama') {
-        // Use OpenAI SDK for Ollama with OpenAI API compatibility
-        const ollamaOpenAI = new OpenAI({
-          baseURL: `${process.env.OLLAMA_API_URL}/v1`,
-          apiKey: 'ollama', // Ollama doesn't require a real API key but the SDK requires some value
-        });
+        attempted++;
+        try {
+          // Fallback is only possible before any content reached the client;
+          // once streaming started the response is already committed.
+          if (fullResponse.length > 0) break;
+          await streamWithEntry(entry);
+          providerRegistry.markSuccess(entry);
+          break;
+        } catch (error) {
+          providerRegistry.markFailure(entry, error.message);
+          errors.push(`${entry.name}: ${error.message}`);
+          console.error(`[ERROR] chat stream via provider '${entry.name}' failed:`, error.message);
+        }
+      }
 
-        const stream = await ollamaOpenAI.chat.completions.create({
-          model: process.env.OLLAMA_MODEL,
-          messages: chatData.messages,
-          stream: true,
-        });
-        
-        for await (const chunk of stream) {
-          const content = chunk.choices[0]?.delta?.content || '';
-          if (content) {
-            fullResponse += content;
-            res.write(`data: ${JSON.stringify({ content })}\n\n`);
-          }
-        }
-      } else {
-        throw new Error('AI Provider not configured');
+      if (!fullResponse && errors.length && attempted > 0) {
+        throw new Error(`All providers failed: ${errors.join(' | ')}`);
       }
 
       // Add the complete response to chat history

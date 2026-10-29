@@ -11,21 +11,34 @@ const paperlessService = require('./paperlessService');
 const fs = require('fs').promises;
 const path = require('path');
 const RestrictionPromptService = require('./restrictionPromptService');
+const providerRegistry = require('./providerRegistry');
 
 class AzureOpenAIService {
   constructor() {
     this.client = null;
+    this.entry = null;
+  }
+
+  /** Bind this service instance to a provider-chain entry. */
+  setProvider(entry) {
+    this.entry = entry;
+    this.client = null;
+    this.initialize();
+  }
+
+  get model() {
+    return (this.entry && this.entry.model) || (this.entry && this.entry.deploymentName) || process.env.AZURE_DEPLOYMENT_NAME || config.azure.deploymentName;
   }
 
   initialize() {
-    if (!this.client && config.aiProvider === 'azure') {
-      this.client = new AzureOpenAI({
-        apiKey: config.azure.apiKey,
-        endpoint: config.azure.endpoint,
-        deploymentName: config.azure.deploymentName,
-        apiVersion: config.azure.apiVersion
-      });
-    }
+    if (this.client) return;
+    const entry = this.entry || { apiKey: config.azure.apiKey, endpoint: config.azure.endpoint, deploymentName: config.azure.deploymentName, apiVersion: config.azure.apiVersion };
+    this.client = new AzureOpenAI({
+      apiKey: entry.apiKey,
+      endpoint: entry.endpoint,
+      deploymentName: entry.deploymentName,
+      apiVersion: entry.apiVersion || '2023-05-15'
+    });
   }
 
   async analyzeDocument(content, existingTags = [], existingCorrespondentList = [], existingDocumentTypesList = [], id, customPrompt = null, options = {}) {
@@ -75,7 +88,7 @@ class AzureOpenAIService {
 
       let systemPrompt = '';
       let promptTags = '';
-      const model = process.env.AZURE_DEPLOYMENT_NAME;
+      const model = this.model;
 
       // Parse CUSTOM_FIELDS from environment variable
       let customFieldsObj;
@@ -224,7 +237,8 @@ class AzureOpenAIService {
       return {
         document: { tags: [], correspondent: null },
         metrics: null,
-        error: error.message
+        error: error.message,
+        providerError: providerRegistry.isProviderError(error)
       };
     }
   }
@@ -291,7 +305,7 @@ class AzureOpenAIService {
 
       // Make API request
       const response = await this.client.chat.completions.create({
-        model: process.env.AZURE_DEPLOYMENT_NAME,
+        model: this.model,
         messages: [
           {
             role: "system",
@@ -347,7 +361,8 @@ class AzureOpenAIService {
       return {
         document: { tags: [], correspondent: null },
         metrics: null,
-        error: error.message
+        error: error.message,
+        providerError: providerRegistry.isProviderError(error)
       };
     }
   }
@@ -365,7 +380,7 @@ class AzureOpenAIService {
         throw new Error('AzureOpenAI client not initialized - missing API key');
       }
 
-      const model = process.env.AZURE_DEPLOYMENT_NAME;
+      const model = this.model;
 
       const response = await this.client.chat.completions.create({
         model: model,
@@ -398,7 +413,7 @@ class AzureOpenAIService {
         throw new Error('AzureOpenAI client not initialized - missing API key');
       }
 
-      const model = process.env.AZURE_DEPLOYMENT_NAME;
+      const model = this.model;
 
       const response = await this.client.chat.completions.create({
         model: model,
@@ -431,7 +446,7 @@ class AzureOpenAIService {
         throw new Error('Azure OpenAI client not initialized - missing API key');
       }
 
-      const model = process.env.AZURE_DEPLOYMENT_NAME;
+      const model = this.model;
 
       const response = await this.client.chat.completions.create({
         model: model,

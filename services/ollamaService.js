@@ -12,6 +12,7 @@ const paperlessService = require('./paperlessService');
 const os = require('os');
 const OpenAI = require('openai');
 const RestrictionPromptService = require('./restrictionPromptService');
+const providerRegistry = require('./providerRegistry');
 
 /**
  * Service for document analysis using Ollama
@@ -21,8 +22,7 @@ class OllamaService {
      * Initialize the Ollama service
      */
     constructor() {
-        this.apiUrl = config.ollama.apiUrl;
-        this.model = config.ollama.model;
+        this.entry = null;
         this.client = axios.create({
             timeout: 1800000 // 30 minutes timeout
         });
@@ -64,6 +64,19 @@ class OllamaService {
             },
             required: ["title", "correspondent", "tags", "document_type", "document_date", "language"]
         };
+    }
+
+    /** Bind this service instance to a provider-chain entry. */
+    setProvider(entry) {
+        this.entry = entry;
+    }
+
+    get apiUrl() {
+        return (this.entry && this.entry.baseUrl) || config.ollama.apiUrl;
+    }
+
+    get model() {
+        return (this.entry && this.entry.model) || config.ollama.model;
     }
 
     /**
@@ -170,7 +183,8 @@ class OllamaService {
             return {
                 document: { tags: [], correspondent: null },
                 metrics: null,
-                error: error.message
+                error: error.message,
+                providerError: providerRegistry.isProviderError(error)
             };
         }
     }
@@ -221,7 +235,8 @@ class OllamaService {
             return {
                 document: { tags: [], correspondent: null },
                 metrics: null,
-                error: error.message
+                error: error.message,
+                providerError: providerRegistry.isProviderError(error)
             };
         }
     }

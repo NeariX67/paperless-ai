@@ -4,6 +4,7 @@ const axios = require('axios');
 const { OpenAI } = require('openai');
 const config = require('../config/config');
 const AzureOpenAI = require('openai').AzureOpenAI;
+const providerRegistry = require('./providerRegistry');
 
 class SetupService {
   constructor() {
@@ -163,45 +164,32 @@ class SetupService {
       throw new Error('Invalid Paperless configuration');
     }
 
-    // Validate AI provider config
-    const aiProvider = config.AI_PROVIDER || 'openai';
+    // Validate the provider chain: the config is valid when at least one
+    // enabled provider answers. A submitted chain (form body) is authoritative
+    // during setup/save; otherwise providers.json, then a legacy entry built
+    // from the config being validated (not process.env, which is still stale
+    // while the setup form is being saved).
+    const providers = Array.isArray(config.providers) && config.providers.length
+      ? config.providers
+      : (await providerRegistry.loadSaved()) || [providerRegistry.legacyEntry(config)];
+    const errors = [];
+    let anyValid = false;
 
-    console.log('AI provider:', aiProvider);
-    
-    if (aiProvider === 'openai') {
-      const openaiValid = await this.validateOpenAIConfig(config.OPENAI_API_KEY);
-      if (!openaiValid) {
-        throw new Error('Invalid OpenAI configuration');
-      }
-    } else if (aiProvider === 'ollama') {
-      const ollamaValid = await this.validateOllamaConfig(
-        config.OLLAMA_API_URL || 'http://localhost:11434',
-        config.OLLAMA_MODEL
-      );
-      if (!ollamaValid) {
-        throw new Error('Invalid Ollama configuration');
-      }
-    } else if (aiProvider === 'custom') {
-      const customValid = await this.validateCustomConfig(
-        config.CUSTOM_BASE_URL,
-        config.CUSTOM_API_KEY,
-        config.CUSTOM_MODEL
-      );
-      if (!customValid) {
-        throw new Error('Invalid Custom AI configuration');
-      }
-    } else if (aiProvider === 'azure') {
-      const azureValid = await this.validateAzureConfig(
-        config.AZURE_API_KEY,
-        config.AZURE_ENDPOINT,
-        config.AZURE_DEPLOYMENT_NAME,
-        config.AZURE_API_VERSION
-      );
-      if (!azureValid) {
-        throw new Error('Invalid Azure configuration');
+    for (const entry of providers) {
+      if (entry.enabled === false) continue;
+      const result = await providerRegistry.validate(entry);
+      if (result.ok) {
+        anyValid = true;
+        providerRegistry.markSuccess(entry);
+      } else {
+        providerRegistry.markFailure(entry, result.error);
+        errors.push(`${entry.name || entry.id}: ${result.error}`);
       }
     }
 
+    if (!anyValid) {
+      throw new Error(`No provider is reachable: ${errors.join(' | ')}`);
+    }
 
     return true;
   }

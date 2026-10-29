@@ -11,29 +11,48 @@ const fs = require('fs').promises;
 const path = require('path');
 const { model } = require('./ollamaService');
 const RestrictionPromptService = require('./restrictionPromptService');
+const providerRegistry = require('./providerRegistry');
 
 class OpenAIService {
   constructor() {
     this.client = null;
+    this.entry = null;
+  }
+
+  /** Bind this service instance to a provider-chain entry. */
+  setProvider(entry) {
+    this.entry = entry;
+    this.client = null;
+    this.initialize();
+  }
+
+  get model() {
+    return (this.entry && this.entry.model) || process.env.OPENAI_MODEL || config.openai.model;
   }
 
   initialize() {
-    if (!this.client && config.aiProvider === 'ollama') {
+    if (this.client) return;
+    if (this.entry) {
+      this.client = new OpenAI({
+        baseURL: this.entry.baseUrl || undefined,
+        apiKey: this.entry.apiKey || 'no-key'
+      });
+      return;
+    }
+    if (config.aiProvider === 'ollama') {
       this.client = new OpenAI({
         baseURL: config.ollama.apiUrl + '/v1',
         apiKey: 'ollama'
       });
-    } else if (!this.client && config.aiProvider === 'custom') {
+    } else if (config.aiProvider === 'custom') {
       this.client = new OpenAI({
         baseURL: config.custom.apiUrl,
         apiKey: config.custom.apiKey
       });
-    } else if (!this.client && config.aiProvider === 'openai') {
-      if (!this.client && config.openai.apiKey) {
-        this.client = new OpenAI({
-          apiKey: config.openai.apiKey
-        });
-      }
+    } else if (config.openai.apiKey) {
+      this.client = new OpenAI({
+        apiKey: config.openai.apiKey
+      });
     }
   }
 
@@ -84,7 +103,7 @@ class OpenAIService {
 
       let systemPrompt = '';
       let promptTags = '';
-      const model = process.env.OPENAI_MODEL;
+      const model = this.model;
 
       // Parse CUSTOM_FIELDS from environment variable
       let customFieldsObj;
@@ -233,7 +252,8 @@ class OpenAIService {
       return {
         document: { tags: [], correspondent: null },
         metrics: null,
-        error: error.message
+        error: error.message,
+        providerError: providerRegistry.isProviderError(error)
       };
     }
   }
@@ -254,11 +274,11 @@ class OpenAIService {
       : String(apiData);
 
     // Calculate tokens for the data
-    const dataTokens = await calculateTokens(dataString, process.env.OPENAI_MODEL);
+    const dataTokens = await calculateTokens(dataString, this.model);
 
     if (dataTokens > maxTokens) {
       console.warn(`[WARNING] External API data (${dataTokens} tokens) exceeds limit (${maxTokens}), truncating`);
-      return await truncateToTokenLimit(dataString, maxTokens, process.env.OPENAI_MODEL);
+      return await truncateToTokenLimit(dataString, maxTokens, this.model);
     }
 
     console.log(`[DEBUG] External API data validated: ${dataTokens} tokens`);
@@ -297,7 +317,7 @@ class OpenAIService {
 
       // Truncate content if necessary
       const truncatedContent = await truncateToTokenLimit(content, availableTokens);
-      const model = process.env.OPENAI_MODEL;
+      const model = this.model;
       // Make API request
       const response = await this.client.chat.completions.create({
         model: model,
@@ -356,7 +376,8 @@ class OpenAIService {
       return {
         document: { tags: [], correspondent: null },
         metrics: null,
-        error: error.message
+        error: error.message,
+        providerError: providerRegistry.isProviderError(error)
       };
     }
   }
@@ -374,7 +395,7 @@ class OpenAIService {
         throw new Error('OpenAI client not initialized - missing API key');
       }
 
-      const model = process.env.OPENAI_MODEL || config.openai.model;
+      const model = this.model;
 
       const response = await this.client.chat.completions.create({
         model: model,
@@ -407,7 +428,7 @@ class OpenAIService {
         throw new Error('OpenAI client not initialized - missing API key');
       }
       const response = await this.client.chat.completions.create({
-        model: process.env.OPENAI_MODEL,
+        model: this.model,
         messages: [
           {
             role: "user",
@@ -419,7 +440,7 @@ class OpenAIService {
       if (!response?.choices?.[0]?.message?.content) {
         throw new Error('Invalid API response structure');
       }
-      return { status: 'ok', model: process.env.OPENAI_MODEL };
+      return { status: 'ok', model: this.model };
     } catch (error) {
       console.error('Error checking OpenAI status:', error);
       return { status: 'error', error: error.message };

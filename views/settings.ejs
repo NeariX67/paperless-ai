@@ -266,150 +266,14 @@
                             </h2>
                             <div class="space-y-4">
                                 <div class="space-y-2">
-                                    <label for="aiProvider" class="text-sm font-medium">AI Provider</label>
-                                    <select id="aiProvider" 
-                                            name="aiProvider"
-                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                                        <option value="openai" <%= config.AI_PROVIDER === 'openai' ? 'selected' : '' %>>OpenAI (ChatGPT)</option>
-                                        <option value="ollama" <%= config.AI_PROVIDER === 'ollama' ? 'selected' : '' %>>Ollama (Local LLM)</option>
-                                        <option value="custom" <%= config.AI_PROVIDER === 'custom' ? 'selected' : '' %>>Custom</option>
-                                        <option value="azure" <%= config.AI_PROVIDER === 'azure' ? 'selected' : '' %>>Azure</option>
-                                    </select>
+                                    <label class="text-sm font-medium">Provider chain (fallback order)</label>
+                                    <p class="text-sm text-gray-500">Providers are tried in priority order (1 = first). If one fails or is unreachable, the next enabled provider is used. At least one provider must be reachable.</p>
                                 </div>
-
-                                <!-- OpenAI Settings -->
-                                <div id="openaiSettings" class="space-y-4">
-                                    <div class="space-y-2">
-                                        <label for="openaiKey" class="text-sm font-medium">OpenAI API Key</label>
-                                        <div class="relative">
-                                            <input type="password" 
-                                                id="openaiKey" 
-                                                name="openaiKey"
-                                                value="<%= config.OPENAI_API_KEY %>"
-                                                class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                                            <button type="button" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600" data-input="openaiKey">
-                                                <i class="fas fa-eye"></i>
-                                            </button>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="space-y-2">
-                                        <label for="openaiModel" class="text-sm font-medium">OpenAI Model</label>
-                                        <select id="openaiModel" 
-                                                name="openaiModel"
-                                                class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                                            <option value="gpt-3.5-turbo-0125" <%= config.OPENAI_MODEL === 'gpt-3.5-turbo-0125' ? 'selected' : '' %>>GPT-3.5 Turbo</option>
-                                            <option value="gpt-4o" <%= config.OPENAI_MODEL === 'gpt-4o' ? 'selected' : '' %>>GPT-4o</option>
-                                            <option value="o3-mini" <%= config.OPENAI_MODEL === 'o3-mini' ? 'selected' : '' %>>o3-mini</option>
-                                            <option value="gpt-4o-mini" <%= config.OPENAI_MODEL === 'gpt-4o-mini' ? 'selected' : '' %>>GPT-4o-mini (Best value)</option>
-                                        </select>
-                                    </div>
-                                </div>
-
-                                <!-- Ollama Settings -->
-                                <div id="ollamaSettings" class="space-y-4">
-                                    <div class="space-y-2">
-                                        <label for="ollamaUrl" class="text-sm font-medium">Ollama API URL</label>
-                                        <input type="text" 
-                                            id="ollamaUrl"
-                                            name="ollamaUrl"
-                                            value="<%= config.OLLAMA_API_URL %>"
-                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                                    </div>
-                                    
-                                    <div class="space-y-2">
-                                        <label for="ollamaModel" class="text-sm font-medium">Ollama Model</label>
-                                        <input type="text" 
-                                            id="ollamaModel" 
-                                            name="ollamaModel"
-                                            value="<%= config.OLLAMA_MODEL %>"
-                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                                    </div>
-                                </div>
-
-                                <!-- Custom Provider Settings -->
-                                <div id="customSettings" class="space-y-4">
-                                    <div class="space-y-2">
-                                        <label for="customBaseUrl" class="text-sm font-medium">Base URL</label>
-                                        <input type="text" 
-                                            id="customBaseUrl" 
-                                            name="customBaseUrl"
-                                            value="<%= config.CUSTOM_BASE_URL %>"
-                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                            placeholder="https://api.example.com">
-                                    </div>
-
-                                    <div class="space-y-2">
-                                        <label for="customApiKey" class="text-sm font-medium">API Key</label>
-                                        <div class="relative">
-                                            <input type="password" 
-                                                id="customApiKey" 
-                                                name="customApiKey"
-                                                value="<%= config.CUSTOM_API_KEY %>"
-                                                class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                                            <button type="button" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600" data-input="customApiKey">
-                                                <i class="fas fa-eye"></i>
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <div class="space-y-2">
-                                        <label for="customModel" class="text-sm font-medium">Model</label>
-                                        <input type="text" 
-                                            id="customModel" 
-                                            name="customModel"
-                                            value="<%= config.CUSTOM_MODEL %>"
-                                            class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                            placeholder="Enter model name">
-                                    </div>
-                                </div>
-
-                                <!-- Azure Settings -->
-                                <div id="azureSettings" class="space-y-4">
-                                    <div class="space-y-2">
-                                        <label for="azureEndpoint">Endpoint</label>
-                                        <input type="text" 
-                                               id="azureEndpoint" 
-                                               name="azureEndpoint"
-                                               value="<%= config.AZURE_ENDPOINT %>"
-                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                               placeholder="https://api.example.com">
-                                    </div>
-                                    
-                                    <div class="space-y-2">
-                                        <label for="azureApiKey">API Key</label>
-                                        <div class="relative">
-                                            <input type="password" 
-                                                   id="azureApiKey" 
-                                                   name="azureApiKey"
-                                                   value="<%= config.AZURE_API_KEY %>"
-                                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                                            <button type="button" class="password-toggle" data-input="azureApiKey">
-                                                <i class="fas fa-eye"></i>
-                                            </button>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="space-y-2">
-                                        <label for="azureDeploymentName">Deployment</label>
-                                        <input type="text" 
-                                               id="azureDeploymentName" 
-                                               name="azureDeploymentName"
-                                               value="<%= config.AZURE_DEPLOYMENT_NAME %>"
-                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                               placeholder="Enter deployment name">
-                                    </div>
-
-                                    <div class="space-y-2">
-                                        <label for="azureApiVersion">API Version</label>
-                                        <input type="text" 
-                                               id="azureApiVersion" 
-                                               name="azureApiVersion"
-                                               value="<%= config.AZURE_API_VERSION %>"
-                                               class="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                               placeholder="Enter API version">
-                                    </div>
-                                </div>
+                                <div id="providerChain" class="space-y-3"></div>
+                                <button type="button" id="addProviderButton" class="px-3 py-2 text-sm rounded-lg bg-blue-500 text-white hover:bg-blue-600">
+                                    <i class="fas fa-plus mr-1"></i> Add provider
+                                </button>
+                                <input type="hidden" id="providers" name="providers" value="">
 
                                 <!-- Token Limit Field -->
                                 <div class="space-y-2">
@@ -1150,6 +1014,11 @@ function transform(data) {
         document.addEventListener('DOMContentLoaded', function() {
             getStarsCount();
         });
+    </script>
+    <script>
+      <%# Escape "<" so names or provider error text cannot close this script tag. %>
+      window.__initialProviders = <%- JSON.stringify(config.PROVIDERS || []).replace(/</g, '\\u003c') %>;
+      window.__initialHealth = <%- JSON.stringify(config.PROVIDER_HEALTH || {}).replace(/</g, '\\u003c') %>;
     </script>
     <script src="js/settings.js"></script>
 </body>

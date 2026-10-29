@@ -11,20 +11,32 @@ const paperlessService = require('./paperlessService');
 const fs = require('fs').promises;
 const path = require('path');
 const RestrictionPromptService = require('./restrictionPromptService');
+const providerRegistry = require('./providerRegistry');
 
 class CustomOpenAIService {
   constructor() {
     this.client = null;
     this.tokenizer = null;
+    this.entry = null;
+  }
+
+  /** Bind this service instance to a provider-chain entry. */
+  setProvider(entry) {
+    this.entry = entry;
+    this.client = null;
+    this.initialize();
+  }
+
+  get model() {
+    return (this.entry && this.entry.model) || config.custom.model;
   }
 
   initialize() {
-    if (!this.client && config.aiProvider === 'custom') {
-      this.client = new OpenAI({
-        baseURL: config.custom.apiUrl,
-        apiKey: config.custom.apiKey
-      });
-    }
+    if (this.client) return;
+    this.client = new OpenAI({
+      baseURL: (this.entry && this.entry.baseUrl) || config.custom.apiUrl,
+      apiKey: (this.entry && this.entry.apiKey) || config.custom.apiKey
+    });
   }
 
   async analyzeDocument(content, existingTags = [], existingCorrespondentList = [], existingDocumentTypesList = [], id, customPrompt = null, options = {}) {
@@ -74,7 +86,7 @@ class CustomOpenAIService {
 
       let systemPrompt = '';
       let promptTags = '';
-      const model = config.custom.model;
+      const model = this.model;
 
       // Parse CUSTOM_FIELDS from environment variable
       let customFieldsObj;
@@ -241,7 +253,8 @@ class CustomOpenAIService {
       return {
         document: { tags: [], correspondent: null },
         metrics: null,
-        error: error.message
+        error: error.message,
+        providerError: providerRegistry.isProviderError(error)
       };
     }
   }
@@ -262,11 +275,11 @@ class CustomOpenAIService {
       : String(apiData);
 
     // Calculate tokens for the data
-    const dataTokens = await calculateTokens(dataString, config.custom.model);
+    const dataTokens = await calculateTokens(dataString, this.model);
 
     if (dataTokens > maxTokens) {
       console.warn(`[WARNING] External API data (${dataTokens} tokens) exceeds limit (${maxTokens}), truncating`);
-      return await truncateToTokenLimit(dataString, maxTokens, config.custom.model);
+      return await truncateToTokenLimit(dataString, maxTokens, this.model);
     }
 
     console.log(`[DEBUG] External API data validated: ${dataTokens} tokens`);
@@ -308,7 +321,7 @@ class CustomOpenAIService {
 
       // Make API request
       const response = await this.client.chat.completions.create({
-        model: config.custom.model,
+        model: this.model,
         messages: [
           {
             role: "system",
@@ -364,7 +377,8 @@ class CustomOpenAIService {
       return {
         document: { tags: [], correspondent: null },
         metrics: null,
-        error: error.message
+        error: error.message,
+        providerError: providerRegistry.isProviderError(error)
       };
     }
   }
@@ -382,7 +396,7 @@ class CustomOpenAIService {
         throw new Error('Custom OpenAI client not initialized - missing API key');
       }
 
-      const model = config.custom.model;
+      const model = this.model;
 
       const response = await this.client.chat.completions.create({
         model: model,
@@ -415,7 +429,7 @@ class CustomOpenAIService {
         throw new Error('Custom OpenAI client not initialized - missing API key');
       }
 
-      const model = config.custom.model;
+      const model = this.model;
 
       const response = await this.client.chat.completions.create({
         model: model,

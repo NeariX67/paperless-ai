@@ -374,6 +374,71 @@
  *           type: string
  *           description: Additional status information (for non-healthy states)
  *           example: Application setup not completed
+ *
+ *     Provider:
+ *       type: object
+ *       required:
+ *         - type
+ *       properties:
+ *         id:
+ *           type: string
+ *           description: Provider identifier (auto-generated when missing)
+ *           example: provider-1
+ *         name:
+ *           type: string
+ *           description: Display name of the provider
+ *           example: Primary Ollama
+ *         type:
+ *           type: string
+ *           enum: [openai, ollama, custom, azure]
+ *           description: Provider backend type
+ *           example: ollama
+ *         priority:
+ *           type: integer
+ *           description: Fallback order, 1 = tried first
+ *           example: 1
+ *         enabled:
+ *           type: boolean
+ *           description: Whether this provider participates in the chain
+ *           example: true
+ *         model:
+ *           type: string
+ *           description: Model (or Azure deployment) to use
+ *           example: llama3.2
+ *         apiKey:
+ *           type: string
+ *           format: password
+ *           description: API key for the provider
+ *         baseUrl:
+ *           type: string
+ *           description: Base URL for OpenAI-compatible providers
+ *           example: http://localhost:11434
+ *         endpoint:
+ *           type: string
+ *           description: Azure endpoint (azure providers only)
+ *         deploymentName:
+ *           type: string
+ *           description: Azure deployment name (azure providers only)
+ *         apiVersion:
+ *           type: string
+ *           description: Azure API version (azure providers only)
+ *           example: "2023-05-15"
+ *         health:
+ *           type: object
+ *           nullable: true
+ *           readOnly: true
+ *           description: Last circuit breaker state for this provider
+ *           properties:
+ *             ok:
+ *               type: boolean
+ *             lastError:
+ *               type: string
+ *               nullable: true
+ *             checkedAt:
+ *               type: integer
+ *               format: int64
+ *             fails:
+ *               type: integer
  */
 
 // This file only contains JSDoc comments for Swagger schema definitions

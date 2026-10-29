@@ -31,7 +31,6 @@ class ThemeManager {
 class FormManager {
     constructor() {
         this.form = document.getElementById('setupForm');
-        this.aiProvider = document.getElementById('aiProvider');
         this.tokenLimit = document.getElementById('tokenLimit'); 
         this.responseTokens = document.getElementById('responseTokens'); 
         this.showTags = document.getElementById('showTags');
@@ -44,11 +43,9 @@ class FormManager {
     }
 
     initialize() {
-        this.toggleProviderSettings();
         this.toggleTagsInput();
         this.handleDisableAutomaticProcessing();
         
-        this.aiProvider.addEventListener('change', () => this.toggleProviderSettings());
         this.tokenLimit.addEventListener('input', () => this.validateTokenLimit()); 
         this.responseTokens.addEventListener('input', () => this.validateResponseTokens()); 
         this.showTags.addEventListener('change', () => this.toggleTagsInput());
@@ -97,85 +94,6 @@ class FormManager {
         
         // Update the hidden input value based on checkbox state
         hiddenInput.value = this.disableAutomaticProcessing.checked ? 'yes' : 'no';
-    }
-
-    toggleProviderSettings() {
-        const provider = this.aiProvider.value;
-        const openaiSettings = document.getElementById('openaiSettings');
-        const ollamaSettings = document.getElementById('ollamaSettings');
-        const customSettings = document.getElementById('customSettings');
-        const azureSettings = document.getElementById('azureSettings');
-
-        // Get all provider-specific fields
-        const openaiKey = document.getElementById('openaiKey');
-        const ollamaUrl = document.getElementById('ollamaUrl');
-        const ollamaModel = document.getElementById('ollamaModel');
-        const customBaseUrl = document.getElementById('customBaseUrl');
-        const customApiKey = document.getElementById('customApiKey');
-        const customModel = document.getElementById('customModel');
-        const azureApiKey = document.getElementById('azureApiKey');
-        const azureEndpoint = document.getElementById('azureEndpoint');
-        const azureDeploymentName = document.getElementById('azureDeploymentName');
-        const azureApiVersion = document.getElementById('azureApiVersion');
-
-        // Restriction settings
-        const restrictToExistingTags = document.getElementById('restrictToExistingTags');
-        const restrictToExistingCorrespondents = document.getElementById('restrictToExistingCorrespondents');
-
-        // External API settings
-        const externalApiEnabled = document.getElementById('externalApiEnabled');
-        const externalApiSettings = document.getElementById('externalApiSettings');
-        const externalApiUrl = document.getElementById('externalApiUrl');
-        const externalApiMethod = document.getElementById('externalApiMethod');
-        const externalApiHeaders = document.getElementById('externalApiHeaders');
-        const externalApiBody = document.getElementById('externalApiBody');
-        const externalApiTimeout = document.getElementById('externalApiTimeout');
-        const externalApiTransformationTemplate = document.getElementById('externalApiTransformationTemplate');
-        
-        
-        // Hide all settings sections first
-        openaiSettings.classList.add('hidden');
-        ollamaSettings.classList.add('hidden');
-        customSettings.classList.add('hidden');
-        azureSettings.classList.add('hidden');
-        
-        // Reset all required fields
-        openaiKey.required = false;
-        ollamaUrl.required = false;
-        ollamaModel.required = false;
-        customBaseUrl.required = false;
-        customApiKey.required = false;
-        customModel.required = false;
-        azureApiKey.required = false;
-        azureEndpoint.required = false;
-        azureDeploymentName.required = false;
-        azureApiVersion.required = false;
-        
-        // Show and set required fields based on selected provider
-        switch (provider) {
-            case 'openai':
-                openaiSettings.classList.remove('hidden');
-                openaiKey.required = true;
-                break;
-            case 'ollama':
-                ollamaSettings.classList.remove('hidden');
-                ollamaUrl.required = true;
-                ollamaModel.required = true;
-                break;
-            case 'custom':
-                customSettings.classList.remove('hidden');
-                customBaseUrl.required = true;
-                customApiKey.required = true;
-                customModel.required = true;
-                break;
-            case 'azure':
-                azureSettings.classList.remove('hidden');
-                azureApiKey.required = true;
-                azureEndpoint.required = true;
-                azureDeploymentName.required = true;
-                azureApiVersion.required = true;
-                break;
-        }
     }
 
     // Rest of the class methods remain the same
@@ -534,6 +452,191 @@ document.addEventListener('DOMContentLoaded', (event) => {
     });
 });
 
+class ProviderChainEditor {
+    constructor() {
+        this.container = document.getElementById('providerChain');
+        this.hiddenInput = document.getElementById('providers');
+        this.addBtn = document.getElementById('addProviderButton');
+        this.providers = (window.__initialProviders && window.__initialProviders.length)
+            ? window.__initialProviders.slice()
+            : [this.defaultProvider()];
+        this.health = window.__initialHealth || {};
+
+        this.addBtn.addEventListener('click', () => {
+            this.providers.push({
+                id: `provider-${this.providers.length + 1}`,
+                name: `Provider ${this.providers.length + 1}`,
+                type: 'custom',
+                priority: this.providers.length + 1,
+                enabled: true,
+                model: '',
+                baseUrl: '',
+                apiKey: '',
+                endpoint: '',
+                deploymentName: '',
+                apiVersion: '2023-05-15'
+            });
+            this.render();
+        });
+
+        this.render();
+    }
+
+    defaultProvider() {
+        const legacy = (window.__initialProviders && window.__initialProviders[0]) || null;
+        return legacy || {
+            id: 'primary',
+            name: 'Primary',
+            type: 'openai',
+            priority: 1,
+            enabled: true,
+            model: 'gpt-4o-mini',
+            apiKey: '',
+            baseUrl: '',
+            endpoint: '',
+            deploymentName: '',
+            apiVersion: '2023-05-15'
+        };
+    }
+
+    syncHidden() {
+        this.hiddenInput.value = JSON.stringify(this.providers);
+    }
+
+    statusBadge(provider) {
+        const h = this.health[provider.id];
+        if (!h) return '<span class="text-xs text-gray-500">not tested</span>';
+        if (h.ok) return '<span class="text-xs text-green-600"><i class="fas fa-check-circle"></i> ok</span>';
+        return `<span class="text-xs text-red-600" title="${(h.lastError || '').replace(/"/g, '&quot;')}"><i class="fas fa-exclamation-circle"></i> failed</span>`;
+    }
+
+    fieldsFor(provider) {
+        const rows = [];
+        const type = provider.type;
+        if (type === 'openai') {
+            rows.push({ key: 'apiKey', label: 'API Key', secret: true, required: true });
+        } else if (type === 'ollama') {
+            rows.push({ key: 'baseUrl', label: 'Base URL', required: true, placeholder: 'http://localhost:11434' });
+        } else if (type === 'custom') {
+            rows.push({ key: 'baseUrl', label: 'Base URL', required: true, placeholder: 'https://api.example.com/v1' });
+            rows.push({ key: 'apiKey', label: 'API Key', secret: true, required: true });
+        } else if (type === 'azure') {
+            rows.push({ key: 'endpoint', label: 'Endpoint', required: true });
+            rows.push({ key: 'apiKey', label: 'API Key', secret: true, required: true });
+            rows.push({ key: 'deploymentName', label: 'Deployment', required: true });
+            rows.push({ key: 'apiVersion', label: 'API Version', required: false });
+        }
+        return rows;
+    }
+
+    render() {
+        this.container.innerHTML = '';
+        this.providers.forEach((provider, index) => {
+            const card = document.createElement('div');
+            card.className = 'border border-gray-300 dark:border-gray-600 rounded-lg p-3 space-y-2 bg-white dark:bg-gray-800';
+            card.dataset.index = index;
+
+            const header = document.createElement('div');
+            header.className = 'flex items-center gap-2 flex-wrap';
+            header.innerHTML = `
+                <span class="font-mono text-sm font-bold w-6">#${index + 1}</span>
+                <input type="text" data-field="name" value="${(provider.name || '').replace(/"/g, '&quot;')}"
+                       class="flex-1 min-w-[8rem] px-2 py-1 border border-gray-300 dark:border-gray-600 rounded" placeholder="Name">
+                <select data-field="type" class="px-2 py-1 border border-gray-300 dark:border-gray-600 rounded">
+                    ${['openai', 'ollama', 'custom', 'azure'].map(t =>
+                        `<option value="${t}" ${provider.type === t ? 'selected' : ''}>${t}</option>`).join('')}
+                </select>
+                <input type="number" data-field="priority" min="1" value="${provider.priority || index + 1}"
+                       class="w-16 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded" title="Priority (1 = tried first)">
+                <label class="flex items-center gap-1 text-sm">
+                    <input type="checkbox" data-field="enabled" ${provider.enabled !== false ? 'checked' : ''}> enabled
+                </label>
+                ${this.statusBadge(provider)}
+                <button type="button" class="px-2 py-1 text-sm rounded bg-gray-200 dark:bg-gray-700 hover:bg-gray-300" data-action="test" title="Test this provider">
+                    <i class="fas fa-bolt"></i> test
+                </button>
+                <button type="button" class="px-2 py-1 text-sm rounded text-red-600 hover:bg-red-50" data-action="remove" title="Remove provider">
+                    <i class="fas fa-trash"></i>
+                </button>
+            `;
+
+            const modelRow = document.createElement('div');
+            modelRow.className = 'flex items-center gap-2 flex-wrap';
+            modelRow.innerHTML = `
+                <label class="text-xs font-medium w-24">Model</label>
+                <input type="text" data-field="model" value="${(provider.model || '').replace(/"/g, '&quot;')}"
+                       class="flex-1 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded" placeholder="model name">
+            `;
+
+            card.appendChild(header);
+            card.appendChild(modelRow);
+
+            for (const field of this.fieldsFor(provider)) {
+                const row = document.createElement('div');
+                row.className = 'flex items-center gap-2 flex-wrap';
+                row.innerHTML = `
+                    <label class="text-xs font-medium w-24">${field.label}</label>
+                    <input type="${field.secret ? 'password' : 'text'}" data-field="${field.key}"
+                           value="${(provider[field.key] || '').replace(/"/g, '&quot;')}"
+                           class="flex-1 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded"
+                           placeholder="${field.placeholder || ''}" ${field.required ? 'required' : ''}>
+                `;
+                card.appendChild(row);
+            }
+
+            card.addEventListener('input', (e) => {
+                const key = e.target.dataset.field;
+                if (!key) return;
+                provider[key] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+                this.syncHidden();
+            });
+            card.addEventListener('change', (e) => {
+                const key = e.target.dataset.field;
+                if (key === 'type') { this.render(); }
+            });
+            card.querySelector('[data-action="remove"]').addEventListener('click', () => {
+                this.providers.splice(index, 1);
+                this.syncHidden();
+                this.render();
+            });
+            card.querySelector('[data-action="test"]').addEventListener('click', async (e) => {
+                const btn = e.currentTarget;
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+                try {
+                    const res = await fetch('/api/providers/test', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(provider)
+                    });
+                    const result = await res.json();
+                    if (result.ok) {
+                        btn.innerHTML = '<i class="fas fa-check-circle text-green-600"></i>';
+                    } else {
+                        btn.innerHTML = `<i class="fas fa-exclamation-circle text-red-600"></i>`;
+                        btn.title = result.error || 'failed';
+                    }
+                } catch (error) {
+                    btn.innerHTML = '<i class="fas fa-exclamation-circle text-red-600"></i>';
+                    btn.title = error.message;
+                } finally {
+                    btn.disabled = false;
+                }
+            });
+
+            this.container.appendChild(card);
+        });
+
+        // Sort view by priority so the list reads top-down as the chain.
+        const sorted = [...this.providers].sort((a, b) => (a.priority || 99) - (b.priority || 99));
+        this.container.querySelectorAll('.font-mono').forEach((el, i) => {
+            const provider = sorted[i];
+            el.textContent = `#${provider.priority || i + 1}`;
+        });
+        this.syncHidden();
+    }
+}
+
 class URLValidator {
     constructor() {
         this.urlInput = document.getElementById('paperlessUrl');
@@ -683,6 +786,9 @@ class TooltipManager {
 document.addEventListener('DOMContentLoaded', () => {
     const urlValidator = new URLValidator();
     const tooltipManager = new TooltipManager();
+    if (document.getElementById('providerChain')) {
+        new ProviderChainEditor();
+    }
 });
 
 

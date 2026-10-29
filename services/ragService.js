@@ -88,7 +88,7 @@ class RagService {
       }
       
       // 3. Use AI service to generate an answer based on the enhanced context
-      const aiService = AIServiceFactory.getService();
+      // (provider chain is resolved inside AIServiceFactory.execute)
       
       // Create a language-agnostic prompt that works in any language
       const prompt = `
@@ -111,7 +111,7 @@ class RagService {
 
       let answer;
       try {
-        answer = await aiService.generateText(prompt);
+        answer = await AIServiceFactory.execute(service => service.generateText(prompt));
       } catch (error) {
         console.error('Error generating answer with AI service:', error);
         answer = "An error occurred while generating an answer. Please try again later.";
@@ -194,8 +194,17 @@ class RagService {
    */
   async getAIStatus() {
     try {
-      const aiService = AIServiceFactory.getService();
-      const status = await aiService.checkStatus();
+      // Return the first provider that answers, trying currently-unhealthy
+      // entries too, so the status check doubles as a circuit-breaker refresh.
+      const status = await AIServiceFactory.execute(async service => {
+        const result = await service.checkStatus();
+        if (result && result.status !== 'ok') {
+          const error = new Error(result.error || 'provider not ok');
+          error.providerError = true;
+          throw error;
+        }
+        return result;
+      }, { allowUnhealthy: true });
       return status;
     } catch (error) {
       console.error('Error checking AI service status:', error);

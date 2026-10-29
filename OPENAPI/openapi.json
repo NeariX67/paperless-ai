@@ -477,6 +477,95 @@
             "example": "Application setup not completed"
           }
         }
+      },
+      "Provider": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Provider identifier (auto-generated when missing)",
+            "example": "provider-1"
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name of the provider",
+            "example": "Primary Ollama"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "ollama",
+              "custom",
+              "azure"
+            ],
+            "description": "Provider backend type",
+            "example": "ollama"
+          },
+          "priority": {
+            "type": "integer",
+            "description": "Fallback order, 1 = tried first",
+            "example": 1
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this provider participates in the chain",
+            "example": true
+          },
+          "model": {
+            "type": "string",
+            "description": "Model (or Azure deployment) to use",
+            "example": "llama3.2"
+          },
+          "apiKey": {
+            "type": "string",
+            "format": "password",
+            "description": "API key for the provider"
+          },
+          "baseUrl": {
+            "type": "string",
+            "description": "Base URL for OpenAI-compatible providers",
+            "example": "http://localhost:11434"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Azure endpoint (azure providers only)"
+          },
+          "deploymentName": {
+            "type": "string",
+            "description": "Azure deployment name (azure providers only)"
+          },
+          "apiVersion": {
+            "type": "string",
+            "description": "Azure API version (azure providers only)",
+            "example": "2023-05-15"
+          },
+          "health": {
+            "type": "object",
+            "nullable": true,
+            "readOnly": true,
+            "description": "Last circuit breaker state for this provider",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "lastError": {
+                "type": "string",
+                "nullable": true
+              },
+              "checkedAt": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "fails": {
+                "type": "integer"
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -3849,6 +3938,197 @@
                       "example": "Failed to fetch processing status"
                     }
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers": {
+      "get": {
+        "summary": "List the provider chain",
+        "description": "Returns the priority-ordered provider chain used for AI calls.\nProviders are stored in data/providers.json; when that file does not\nexist the chain contains a single entry derived from the legacy\nenvironment configuration. Each entry carries the last known health\nstatus from the circuit breaker.\n",
+        "tags": [
+          "API",
+          "Providers"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provider chain returned successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Provider"
+                      }
+                    },
+                    "health": {
+                      "type": "object",
+                      "description": "Circuit breaker state keyed by provider id"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error occurred while loading providers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Save the provider chain",
+        "description": "Replaces the provider chain with the submitted list. Entries are\nvalidated (provider type must be known) and saved to data/providers.json\nin priority order. The top-priority enabled provider is mirrored into\nthe legacy environment variables for backward compatibility. The health\ncache is cleared on save.\n",
+        "tags": [
+          "API",
+          "Providers"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "providers"
+                ],
+                "properties": {
+                  "providers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Provider"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Provider chain saved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Provider"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid provider list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error occurred while saving providers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/test": {
+      "post": {
+        "summary": "Test a single provider",
+        "description": "Sends a minimal test request to the given provider entry without\ntouching the saved chain. The result updates the circuit breaker\nhealth cache for the provider id when one is supplied.\n",
+        "tags": [
+          "API",
+          "Providers"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Provider"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Test executed; ok reflects the result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "error": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error occurred while testing the provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
