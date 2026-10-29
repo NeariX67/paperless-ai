@@ -172,22 +172,10 @@ class SetupService {
     const providers = Array.isArray(config.providers) && config.providers.length
       ? config.providers
       : (await providerRegistry.loadSaved()) || [providerRegistry.legacyEntry(config)];
-    const errors = [];
-    let anyValid = false;
-
-    for (const entry of providers) {
-      if (entry.enabled === false) continue;
-      const result = await providerRegistry.validate(entry);
-      if (result.ok) {
-        anyValid = true;
-        providerRegistry.markSuccess(entry);
-      } else {
-        providerRegistry.markFailure(entry, result.error);
-        errors.push(`${entry.name || entry.id}: ${result.error}`);
-      }
-    }
-
-    if (!anyValid) {
+    // Stop at the first reachable provider: this runs on every startup, and
+    // testing the whole chain would cost a request per provider each time.
+    const { ok, errors } = await providerRegistry.validateChain(providers, { stopAtFirst: true });
+    if (!ok) {
       throw new Error(`No provider is reachable: ${errors.join(' | ')}`);
     }
 

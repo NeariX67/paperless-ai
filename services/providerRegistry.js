@@ -8,6 +8,27 @@ const PROVIDERS_PATH = path.join(process.cwd(), 'data', 'providers.json');
 const HEALTH_TTL_MS = 60000; // unhealthy providers are retried after this delay
 const NETWORK_ERROR_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNABORTED', 'EHOSTUNREACH']);
 const PROVIDER_ERROR_STATUSES = new Set([401, 403, 404, 408, 429]);
+const KNOWN_TYPES = ['openai', 'ollama', 'custom', 'azure'];
+const MASKED_KEY = '********'; // stands in for a stored API key sent to clients
+
+/** Invalid chain submitted by a client; routes answer it with a 400. */
+class ChainError extends Error {
+  constructor(message) {
+    super(message);
+    this.status = 400;
+  }
+}
+
+/**
+ * Store base URLs without trailing slashes, and Ollama URLs as the bare host
+ * (no /v1): the native API lives at /api/... and the OpenAI-compatible one at
+ * /v1, so each caller appends what it needs.
+ */
+function cleanBaseUrl(type, url) {
+  let clean = (url || '').trim().replace(/\/+$/, '');
+  if (type === 'ollama') clean = clean.replace(/\/v1$/, '') || 'http://localhost:11434';
+  return clean;
+}
 
 /**
  * Central provider chain. Providers are stored in data/providers.json as a
@@ -33,7 +54,8 @@ class ProviderRegistry {
       const raw = await fs.readFile(PROVIDERS_PATH, 'utf8');
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length) {
-        this.providers = parsed;
+        // Files saved before URL cleanup may still hold e.g. an Ollama /v1 URL.
+        this.providers = parsed.map(p => ({ ...p, baseUrl: cleanBaseUrl(p.type, p.baseUrl) }));
         return this.providers;
       }
     } catch (error) {
@@ -53,7 +75,7 @@ class ProviderRegistry {
         entry.model = src.OPENAI_MODEL || 'gpt-4o-mini';
         break;
       case 'ollama':
-        entry.baseUrl = src.OLLAMA_API_URL || 'http://localhost:11434';
+        entry.baseUrl = cleanBaseUrl('ollama', src.OLLAMA_API_URL);
         entry.model = src.OLLAMA_MODEL || 'llama3.2';
         break;
       case 'custom':
@@ -80,30 +102,89 @@ class ProviderRegistry {
       .sort((a, b) => (a.priority || 99) - (b.priority || 99));
   }
 
-  /** Resolve the entry for a service provider type (openai/ollama/custom/azure). */
-  async resolveFor(type) {
-    const providers = await this.getProviders();
-    const entry = providers.find(p => p.type === type && p.enabled !== false);
-    return entry || this.legacyEntry();
-  }
+  /**
+   * Parse and normalise a submitted chain (JSON string or array). Throws a
+   * ChainError (status 400) for malformed input or unknown provider types.
+   * API keys still masked by maskKeys() are restored from the saved chain.
+   */
+  async prepareChain(input) {
+    let list = input;
+    if (typeof list === 'string') {
+      try {
+        list = JSON.parse(list);
+      } catch (error) {
+        throw new ChainError('Invalid provider chain: expected a JSON array');
+      }
+    }
+    if (!Array.isArray(list) || !list.length) {
+      throw new ChainError('At least one provider is required');
+    }
 
-  async saveProviders(list) {
-    const clean = (Array.isArray(list) ? list : [])
-      .filter(p => p && p.type)
-      .map((p, i) => ({
-        id: p.id || `provider-${i + 1}`,
-        name: p.name || p.id || `Provider ${i + 1}`,
+    const saved = await this.getProviders();
+    const seenIds = new Set();
+    return list.map((p, i) => {
+      if (!p || !KNOWN_TYPES.includes(p.type)) {
+        throw new ChainError(`Unknown provider type '${p && p.type}'`);
+      }
+      let id = p.id || `provider-${i + 1}`;
+      while (seenIds.has(id)) id = `${id}-${i + 1}`;
+      seenIds.add(id);
+
+      let apiKey = p.apiKey || '';
+      if (apiKey === MASKED_KEY) {
+        const match = saved.find(s => s.id === p.id);
+        apiKey = (match && match.apiKey) || '';
+      }
+
+      return {
+        id,
+        name: p.name || id,
         type: p.type,
         priority: Number(p.priority) || i + 1,
         enabled: p.enabled !== false,
         model: p.model || '',
-        apiKey: p.apiKey || '',
-        baseUrl: p.baseUrl || '',
+        apiKey,
+        baseUrl: cleanBaseUrl(p.type, p.baseUrl),
         endpoint: p.endpoint || '',
         deploymentName: p.deploymentName || '',
         apiVersion: p.apiVersion || '2023-05-15'
-      }));
-    if (!clean.length) throw new Error('At least one provider is required');
+      };
+    });
+  }
+
+  /** Copy of a chain with API keys replaced by a placeholder, for clients. */
+  maskKeys(list) {
+    return list.map(p => ({ ...p, apiKey: p.apiKey ? MASKED_KEY : '' }));
+  }
+
+  /**
+   * Send a test request to each enabled entry in priority order and record
+   * the result in the health cache. With stopAtFirst, stops at the first
+   * reachable provider (enough to know the chain works).
+   */
+  async validateChain(list, { stopAtFirst = false } = {}) {
+    const entries = list
+      .filter(p => p.enabled !== false)
+      .sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    const errors = [];
+    let ok = false;
+
+    for (const entry of entries) {
+      const result = await this.validate(entry);
+      if (result.ok) {
+        ok = true;
+        this.markSuccess(entry);
+        if (stopAtFirst) break;
+      } else {
+        this.markFailure(entry, result.error);
+        errors.push(`${entry.name || entry.id}: ${result.error}`);
+      }
+    }
+    return { ok, errors };
+  }
+
+  async saveProviders(list) {
+    const clean = await this.prepareChain(list);
 
     await fs.mkdir(path.dirname(PROVIDERS_PATH), { recursive: true });
     await fs.writeFile(PROVIDERS_PATH, JSON.stringify(clean, null, 2));
@@ -143,9 +224,10 @@ class ProviderRegistry {
         apiVersion: entry.apiVersion || '2023-05-15'
       });
     }
+    const baseUrl = cleanBaseUrl(entry.type, entry.baseUrl);
     return new OpenAI({
       apiKey: entry.apiKey || (entry.type === 'ollama' ? 'ollama' : 'no-key'),
-      ...(entry.baseUrl ? { baseURL: entry.type === 'ollama' && !entry.baseUrl.endsWith('/v1') ? `${entry.baseUrl}/v1` : entry.baseUrl } : {})
+      ...(baseUrl ? { baseURL: entry.type === 'ollama' ? `${baseUrl}/v1` : baseUrl } : {})
     });
   }
 
@@ -153,7 +235,7 @@ class ProviderRegistry {
   async validate(entry) {
     try {
       if (entry.type === 'ollama') {
-        const response = await axios.post(`${(entry.baseUrl || 'http://localhost:11434').replace(/\/v1$/, '')}/api/generate`, {
+        const response = await axios.post(`${cleanBaseUrl('ollama', entry.baseUrl)}/api/generate`, {
           model: entry.model,
           prompt: 'Test',
           stream: false
@@ -224,3 +306,4 @@ class ProviderRegistry {
 }
 
 module.exports = new ProviderRegistry();
+module.exports.ChainError = ChainError;

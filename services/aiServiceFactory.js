@@ -1,4 +1,3 @@
-const config = require('../config/config');
 const openaiService = require('./openaiService');
 const ollamaService = require('./ollamaService');
 const customService = require('./customService');
@@ -18,11 +17,6 @@ const SERVICE_BY_TYPE = {
 const instances = new Map();
 
 class AIServiceFactory {
-  /** Single service for the configured provider (legacy behaviour). */
-  static getService() {
-    return SERVICE_BY_TYPE[config.aiProvider] || openaiService;
-  }
-
   /** Service instance bound to a provider-chain entry (null for unknown types). */
   static getServiceFor(entry) {
     const singleton = SERVICE_BY_TYPE[entry.type];
@@ -73,6 +67,9 @@ class AIServiceFactory {
         if (error.providerError || providerRegistry.isProviderError(error)) {
           providerRegistry.markFailure(entry, error.message);
         }
+        // The caller already committed output from this provider (e.g. a
+        // partially streamed reply), so another provider can't take over.
+        if (error.noFallback) throw error;
         errors.push(`${entry.name}: ${error.message}`);
         console.error(`[ERROR] provider '${entry.name}' failed, trying next in chain:`, error.message);
         return { done: false };

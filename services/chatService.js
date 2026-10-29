@@ -7,8 +7,8 @@ const os = require('os');
 const stream = require('stream');
 const { promisify } = require('util');
 const pipeline = promisify(stream.pipeline);
-const { OpenAI } = require('openai');
 const providerRegistry = require('./providerRegistry');
+const AIServiceFactory = require('./aiServiceFactory');
 
 class ChatService {
   constructor() {
@@ -135,33 +135,18 @@ class ChatService {
         }
       };
 
-      const chain = await providerRegistry.getChain();
-      const errors = [];
-      let attempted = 0;
-
-      for (const entry of chain) {
-        if (providerRegistry.isUnhealthy(entry) && attempted > 0) {
-          errors.push(`${entry.name}: skipped (unhealthy)`);
-          continue;
-        }
-        attempted++;
+      // Same chain and circuit breaker as the other AI calls. Fallback is only
+      // possible before any content reached the client; a stream that fails
+      // after that is reported as an error instead of saved as a full reply.
+      await AIServiceFactory.execute(async (service, entry) => {
         try {
-          // Fallback is only possible before any content reached the client;
-          // once streaming started the response is already committed.
-          if (fullResponse.length > 0) break;
           await streamWithEntry(entry);
-          providerRegistry.markSuccess(entry);
-          break;
         } catch (error) {
-          providerRegistry.markFailure(entry, error.message);
-          errors.push(`${entry.name}: ${error.message}`);
-          console.error(`[ERROR] chat stream via provider '${entry.name}' failed:`, error.message);
+          if (fullResponse) error.noFallback = true;
+          throw error;
         }
-      }
-
-      if (!fullResponse && errors.length && attempted > 0) {
-        throw new Error(`All providers failed: ${errors.join(' | ')}`);
-      }
+        return { ok: true };
+      });
 
       // Add the complete response to chat history
       chatData.messages.push({

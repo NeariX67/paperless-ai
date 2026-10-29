@@ -2,9 +2,6 @@ const express = require('express');
 const router = express.Router();
 const setupService = require('../services/setupService.js');
 const paperlessService = require('../services/paperlessService.js');
-const openaiService = require('../services/openaiService.js');
-const ollamaService = require('../services/ollamaService.js');
-const azureService = require('../services/azureService.js');
 const documentModel = require('../models/document.js');
 const AIServiceFactory = require('../services/aiServiceFactory');
 const providerRegistry = require('../services/providerRegistry');
@@ -20,7 +17,6 @@ const bcrypt = require('bcryptjs');
 const cookieParser = require('cookie-parser');
 const { authenticateJWT, isAuthenticated } = require('./auth.js');
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-const customService = require('../services/customService.js');
 const config = require('../config/config.js');
 require('dotenv').config({ path: '../data/.env' });
 
@@ -2719,7 +2715,7 @@ router.get('/settings', async (req, res) => {
     EXTERNAL_API_BODY: process.env.EXTERNAL_API_BODY || '{}',
     EXTERNAL_API_TIMEOUT: process.env.EXTERNAL_API_TIMEOUT || '5000',
     EXTERNAL_API_TRANSFORM: process.env.EXTERNAL_API_TRANSFORM || '',
-    PROVIDERS: await providerRegistry.getProviders(),
+    PROVIDERS: providerRegistry.maskKeys(await providerRegistry.getProviders()),
     PROVIDER_HEALTH: providerRegistry.getHealth()
   };
   
@@ -4125,29 +4121,13 @@ router.post('/settings', express.json(), async (req, res) => {
 
     // Handle AI provider configuration
     if (providers) {
-      // Provider chain submitted as JSON by the settings UI: validate each
-      // enabled entry and require at least one reachable provider, then persist
-      // the chain (which mirrors the top-priority entry into env vars).
-      let chain;
-      try {
-        chain = typeof providers === 'string' ? JSON.parse(providers) : providers;
-      } catch (error) {
-        return res.status(400).json({ error: 'Invalid provider chain: expected a JSON array' });
+      // Provider chain submitted as JSON by the settings UI: require at least
+      // one reachable provider, then persist the chain (which mirrors the
+      // top-priority entry into env vars).
+      const result = await saveProviderChain(providers);
+      if (result.error) {
+        return res.status(400).json({ error: result.error });
       }
-      if (!Array.isArray(chain) || !chain.length) {
-        return res.status(400).json({ error: 'Provider chain must contain at least one provider' });
-      }
-      const KNOWN_TYPES = ['openai', 'ollama', 'custom', 'azure'];
-      for (const p of chain) {
-        if (!KNOWN_TYPES.includes(p.type)) {
-          return res.status(400).json({ error: `Unknown provider type '${p.type}'` });
-        }
-      }
-      const anyChainEntryOk = await setupService.validateConfig({ ...currentConfig, providers: chain });
-      if (!anyChainEntryOk) {
-        return res.status(400).json({ error: 'No provider in the chain is reachable' });
-      }
-      await providerRegistry.saveProviders(chain);
     } else if (aiProvider) {
       updatedConfig.AI_PROVIDER = aiProvider;
       
@@ -4386,6 +4366,26 @@ router.get('/dashboard/doc/:id', async (req, res) => {
 });
 
 /**
+ * Validate and persist a submitted provider chain (JSON string or array).
+ * Returns { error } for a client mistake (malformed chain, unknown type, no
+ * reachable provider) and { saved } on success; other failures throw.
+ */
+async function saveProviderChain(input) {
+  let chain;
+  try {
+    chain = await providerRegistry.prepareChain(input);
+  } catch (error) {
+    if (error instanceof providerRegistry.ChainError) return { error: error.message };
+    throw error;
+  }
+  const { ok, errors } = await providerRegistry.validateChain(chain);
+  if (!ok) {
+    return { error: `No provider in the chain is reachable: ${errors.join(' | ')}` };
+  }
+  return { saved: await providerRegistry.saveProviders(chain) };
+}
+
+/**
  * @swagger
  * /api/providers:
  *   get:
@@ -4395,7 +4395,8 @@ router.get('/dashboard/doc/:id', async (req, res) => {
  *       Providers are stored in data/providers.json; when that file does not
  *       exist the chain contains a single entry derived from the legacy
  *       environment configuration. Each entry carries the last known health
- *       status from the circuit breaker.
+ *       status from the circuit breaker. Stored API keys are returned as
+ *       "********"; sending that value back on save keeps the stored key.
  *     tags: [API, Providers]
  *     security:
  *       - BearerAuth: []
@@ -4424,7 +4425,7 @@ router.get('/dashboard/doc/:id', async (req, res) => {
  */
 router.get('/api/providers', async (req, res) => {
   try {
-    const providers = await providerRegistry.getProviders();
+    const providers = providerRegistry.maskKeys(await providerRegistry.getProviders());
     const health = providerRegistry.getHealth();
     res.json({
       providers: providers.map(p => ({ ...p, health: health[p.id] || null })),
@@ -4442,9 +4443,11 @@ router.get('/api/providers', async (req, res) => {
  *   post:
  *     summary: Save the provider chain
  *     description: |
- *       Replaces the provider chain with the submitted list. Entries are
- *       validated (provider type must be known) and saved to data/providers.json
- *       in priority order. The top-priority enabled provider is mirrored into
+ *       Replaces the provider chain with the submitted list. Entries must have
+ *       a known provider type, and at least one enabled provider must answer a
+ *       test request; the chain is then saved to data/providers.json in
+ *       priority order. An apiKey of "********" keeps the stored key for that
+ *       provider id. The top-priority enabled provider is mirrored into
  *       the legacy environment variables for backward compatibility. The health
  *       cache is cleared on save.
  *     tags: [API, Providers]
@@ -4492,19 +4495,11 @@ router.get('/api/providers', async (req, res) => {
  */
 router.post('/api/providers', express.json(), async (req, res) => {
   try {
-    const { providers } = req.body;
-    const chain = Array.isArray(req.body) ? req.body : providers;
-    const KNOWN_TYPES = ['openai', 'ollama', 'custom', 'azure'];
-    if (!Array.isArray(chain) || !chain.length) {
-      return res.status(400).json({ error: 'At least one provider is required' });
+    const result = await saveProviderChain(Array.isArray(req.body) ? req.body : req.body.providers);
+    if (result.error) {
+      return res.status(400).json({ error: result.error });
     }
-    for (const p of chain) {
-      if (!KNOWN_TYPES.includes(p.type)) {
-        return res.status(400).json({ error: `Unknown provider type '${p.type}'` });
-      }
-    }
-    const saved = await providerRegistry.saveProviders(chain);
-    res.json({ success: true, providers: saved });
+    res.json({ success: true, providers: providerRegistry.maskKeys(result.saved) });
   } catch (error) {
     console.error('[ERROR] saving provider chain:', error);
     res.status(500).json({ error: error.message });
@@ -4552,16 +4547,20 @@ router.post('/api/providers', express.json(), async (req, res) => {
  */
 router.post('/api/providers/test', express.json(), async (req, res) => {
   try {
-    const entry = req.body;
-    if (!entry || !entry.type) {
+    if (!req.body || !req.body.type) {
       return res.status(400).json({ error: 'Provider entry is required' });
     }
+    // Normalises the entry and restores a masked API key from the saved chain.
+    const [entry] = await providerRegistry.prepareChain([req.body]);
     const result = await providerRegistry.validate(entry);
-    if (entry.id) {
+    if (req.body.id) {
       result.ok ? providerRegistry.markSuccess(entry) : providerRegistry.markFailure(entry, result.error);
     }
     res.json(result);
   } catch (error) {
+    if (error instanceof providerRegistry.ChainError) {
+      return res.status(400).json({ error: error.message });
+    }
     console.error('[ERROR] testing provider:', error);
     res.status(500).json({ error: error.message });
   }

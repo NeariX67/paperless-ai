@@ -463,11 +463,15 @@ class ProviderChainEditor {
         this.health = window.__initialHealth || {};
 
         this.addBtn.addEventListener('click', () => {
+            const lowest = Math.max(0, ...this.providers.map(p => Number(p.priority) || 0));
             this.providers.push({
-                id: `provider-${this.providers.length + 1}`,
+                // Unique even after removals; health status is keyed by id.
+                // (crypto.randomUUID needs a secure context, which plain-HTTP
+                // LAN installs don't have.)
+                id: `provider-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
                 name: `Provider ${this.providers.length + 1}`,
                 type: 'custom',
-                priority: this.providers.length + 1,
+                priority: lowest + 1,
                 enabled: true,
                 model: '',
                 baseUrl: '',
@@ -531,10 +535,11 @@ class ProviderChainEditor {
 
     render() {
         this.container.innerHTML = '';
-        this.providers.forEach((provider, index) => {
+        // Show cards in chain order, so the list reads top-down as the chain.
+        const sorted = [...this.providers].sort((a, b) => (Number(a.priority) || 99) - (Number(b.priority) || 99));
+        sorted.forEach((provider, index) => {
             const card = document.createElement('div');
             card.className = 'border border-gray-300 dark:border-gray-600 rounded-lg p-3 space-y-2 bg-white dark:bg-gray-800';
-            card.dataset.index = index;
 
             const header = document.createElement('div');
             header.className = 'flex items-center gap-2 flex-wrap';
@@ -592,10 +597,12 @@ class ProviderChainEditor {
             });
             card.addEventListener('change', (e) => {
                 const key = e.target.dataset.field;
-                if (key === 'type') { this.render(); }
+                // Re-render on type (different fields) and on priority (new
+                // position); "change" fires on blur, not on every keystroke.
+                if (key === 'type' || key === 'priority') { this.render(); }
             });
             card.querySelector('[data-action="remove"]').addEventListener('click', () => {
-                this.providers.splice(index, 1);
+                this.providers.splice(this.providers.indexOf(provider), 1);
                 this.syncHidden();
                 this.render();
             });
@@ -625,13 +632,6 @@ class ProviderChainEditor {
             });
 
             this.container.appendChild(card);
-        });
-
-        // Sort view by priority so the list reads top-down as the chain.
-        const sorted = [...this.providers].sort((a, b) => (a.priority || 99) - (b.priority || 99));
-        this.container.querySelectorAll('.font-mono').forEach((el, i) => {
-            const provider = sorted[i];
-            el.textContent = `#${provider.priority || i + 1}`;
         });
         this.syncHidden();
     }
