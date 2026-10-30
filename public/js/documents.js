@@ -39,7 +39,7 @@ function safeColor(value, fallback) {
 }
 
 // DataTables column index -> Paperless ordering field (null = not sortable).
-const ORDERING_BY_COLUMN = { 1: 'id', 2: 'title', 4: 'correspondent__name', 5: 'created' };
+const ORDERING_BY_COLUMN = { 1: 'id', 2: 'title', 4: 'correspondent__name', 5: 'created', 6: 'processed_at' };
 
 class DocumentsPage {
     constructor() {
@@ -66,6 +66,7 @@ class DocumentsPage {
             tags: this.tagSelect.getValue().map(Number),
             tagMode: document.getElementById('tagMode').value,
             correspondents: this.correspondentSelect.getValue().map(Number),
+            processed: document.getElementById('processedFilter').value,
             search: this.table ? this.table.search() : ''
         };
     }
@@ -76,7 +77,7 @@ class DocumentsPage {
             processing: true,
             searchDelay: 400,
             pageLength: 25,
-            lengthMenu: [10, 25, 50, 100],
+            lengthMenu: [[10, 25, 50, 100, -1], [10, 25, 50, 100, 'All']],
             order: [[5, 'desc']],
             ajax: (data, callback) => this.loadPage(data, callback),
             columns: [
@@ -110,7 +111,6 @@ class DocumentsPage {
                 },
                 {
                     data: 'processedAt',
-                    orderable: false,
                     className: 'whitespace-nowrap',
                     render: (processedAt) => {
                         if (!processedAt) return '<span class="text-gray-400 text-sm">Not processed</span>';
@@ -142,13 +142,15 @@ class DocumentsPage {
     async loadPage(data, callback) {
         const order = data.order && data.order[0];
         const field = order && ORDERING_BY_COLUMN[order.column];
+        // data.length is -1 for "All": one page holding every match.
         const params = new URLSearchParams({
-            page: String(Math.floor(data.start / data.length) + 1),
+            page: String(data.length > 0 ? Math.floor(data.start / data.length) + 1 : 1),
             pageSize: String(data.length),
             ordering: field ? (order.dir === 'desc' ? `-${field}` : field) : '-created',
             tags: this.tagSelect.getValue().join(','),
             tagMode: document.getElementById('tagMode').value,
             correspondents: this.correspondentSelect.getValue().join(','),
+            processed: document.getElementById('processedFilter').value,
             search: data.search.value || ''
         });
 
@@ -177,6 +179,7 @@ class DocumentsPage {
         this.tagSelect.on('change', reload);
         this.correspondentSelect.on('change', reload);
         document.getElementById('tagMode').addEventListener('change', reload);
+        document.getElementById('processedFilter').addEventListener('change', reload);
         this.table.on('search.dt', () => {
             if (this.allMatching && this.allMatching.search !== this.table.search()) this.allMatching = null;
         });
@@ -184,6 +187,7 @@ class DocumentsPage {
             this.tagSelect.clear(true);
             this.correspondentSelect.clear(true);
             document.getElementById('tagMode').value = 'any';
+            document.getElementById('processedFilter').value = 'any';
             this.table.search('');
             reload();
         });

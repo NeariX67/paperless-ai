@@ -150,6 +150,14 @@
                             <% }); %>
                         </select>
                     </div>
+                    <div>
+                        <label for="processedFilter" class="block text-sm font-medium mb-1">Paperless-AI</label>
+                        <select id="processedFilter" class="px-3 py-2 border rounded-lg">
+                            <option value="any">All documents</option>
+                            <option value="unprocessed">Not processed</option>
+                            <option value="processed">Processed</option>
+                        </select>
+                    </div>
                     <button id="clearFilters" class="px-3 py-2 border rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
                         Clear filters
                     </button>

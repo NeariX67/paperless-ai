@@ -1306,8 +1306,11 @@ router.get('/api/history', async (req, res) => {
 
 // --- Documents browser -------------------------------------------------------
 
+// processed_at is Paperless-AI's own timestamp; everything else is sorted by Paperless-ngx.
 const DOCUMENT_ORDERINGS = ['created', '-created', 'added', '-added', 'title', '-title',
-  'correspondent__name', '-correspondent__name', 'id', '-id'];
+  'correspondent__name', '-correspondent__name', 'id', '-id', 'processed_at', '-processed_at'];
+const PROCESSED_FILTERS = ['any', 'processed', 'unprocessed'];
+const ALL_DOCUMENTS_PAGE_SIZE = 100000; // Paperless-ngx's largest page size
 
 // Tags and correspondents change rarely, and loading them pages through the
 // Paperless API, so the documents browser reuses them for a minute.
@@ -1341,8 +1344,51 @@ function parseDocumentFilters(source = {}) {
     tags: parseIdList(source.tags),
     tagMode: source.tagMode === 'all' ? 'all' : 'any',
     correspondents: parseIdList(source.correspondents),
-    search: typeof source.search === 'string' ? source.search.trim().slice(0, 200) : ''
+    search: typeof source.search === 'string' ? source.search.trim().slice(0, 200) : '',
+    processed: PROCESSED_FILTERS.includes(source.processed) ? source.processed : 'any'
   };
+}
+
+/** Whether a document passes the processed filter (processedAt: Map of id -> timestamp). */
+function matchesProcessed(processedAt, processed, id) {
+  if (processed === 'processed') return processedAt.has(id);
+  if (processed === 'unprocessed') return !processedAt.has(id);
+  return true;
+}
+
+/**
+ * One page of documents. Paperless-ngx filters, sorts and pages by itself,
+ * except by what only Paperless-AI knows (whether and when it processed a
+ * document): then the ids of every match are filtered and sorted here, and
+ * only the page's documents are loaded.
+ */
+async function listDocuments({ page, pageSize, ordering, filters, processedAt }) {
+  const byProcessedAt = ordering === 'processed_at' || ordering === '-processed_at';
+  if (filters.processed === 'any' && !byProcessedAt) {
+    return paperlessService.listDocumentsPage({ page, pageSize, ordering, ...filters });
+  }
+
+  let ids = (await paperlessService.getMatchingDocumentIds({ ...filters, ordering: byProcessedAt ? '-created' : ordering }))
+    .filter(id => matchesProcessed(processedAt, filters.processed, id));
+  if (byProcessedAt) {
+    // Documents never processed come last in both directions; the sort is
+    // stable, so ties stay newest-created first.
+    const direction = ordering.startsWith('-') ? -1 : 1;
+    ids = ids.slice().sort((a, b) => {
+      const timeA = processedAt.get(a);
+      const timeB = processedAt.get(b);
+      if (!timeA || !timeB) return (timeA ? 0 : 1) - (timeB ? 0 : 1);
+      return timeA < timeB ? -direction : timeA > timeB ? direction : 0;
+    });
+  }
+
+  const pageIds = ids.slice((page - 1) * pageSize, page * pageSize);
+  // A large page ("All") is cheaper as one listing of every match than as id lookups.
+  const documents = pageIds.length > 100
+    ? (await paperlessService.listDocumentsPage({ page: 1, pageSize: ALL_DOCUMENTS_PAGE_SIZE, ...filters })).results
+    : await paperlessService.getDocumentsByIds(pageIds);
+  const byId = new Map(documents.map(doc => [doc.id, doc]));
+  return { count: ids.length, results: pageIds.map(id => byId.get(id)).filter(Boolean) };
 }
 
 router.get('/documents', async (req, res) => {
@@ -1380,6 +1426,7 @@ router.get('/documents', async (req, res) => {
  *       - in: query
  *         name: pageSize
  *         schema: { type: integer, default: 25, maximum: 100 }
+ *         description: Documents per page; -1 returns every matching document
  *       - in: query
  *         name: tags
  *         schema: { type: string }
@@ -1398,11 +1445,16 @@ router.get('/documents', async (req, res) => {
  *         schema: { type: string }
  *         description: Search in title and content
  *       - in: query
+ *         name: processed
+ *         schema: { type: string, enum: [any, processed, unprocessed], default: any }
+ *         description: Only documents Paperless-AI has (or has not) processed
+ *       - in: query
  *         name: ordering
  *         schema:
  *           type: string
- *           enum: [created, -created, added, -added, title, -title, correspondent__name, -correspondent__name, id, -id]
+ *           enum: [created, -created, added, -added, title, -title, correspondent__name, -correspondent__name, id, -id, processed_at, -processed_at]
  *           default: -created
+ *         description: processed_at sorts by when Paperless-AI last processed the document; documents it never processed come last
  *     responses:
  *       200:
  *         description: One page of documents
@@ -1454,16 +1506,20 @@ router.get('/documents', async (req, res) => {
 router.get('/api/documents', async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+    // -1 (DataTables' "All") lists every matching document on one page.
+    const pageSize = parseInt(req.query.pageSize, 10) === -1
+      ? ALL_DOCUMENTS_PAGE_SIZE
+      : Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
     const ordering = DOCUMENT_ORDERINGS.includes(req.query.ordering) ? req.query.ordering : '-created';
+    const filters = parseDocumentFilters(req.query);
+    const processedAt = await documentModel.getAllProcessedAt();
 
     const [{ count, results }, reference] = await Promise.all([
-      paperlessService.listDocumentsPage({ page, pageSize, ordering, ...parseDocumentFilters(req.query) }),
+      listDocuments({ page, pageSize, ordering, filters, processedAt }),
       getDocumentsReferenceData()
     ]);
     const tagMap = new Map(reference.tags.map(tag => [tag.id, tag]));
     const correspondentMap = new Map(reference.correspondents.map(c => [c.id, c]));
-    const processedAt = await documentModel.getProcessedAt(results.map(doc => doc.id));
     const baseURL = process.env.PAPERLESS_API_URL.replace(/\/api$/, '');
 
     res.json({
@@ -1477,7 +1533,7 @@ router.get('/api/documents', async (req, res) => {
         correspondent: doc.correspondent
           ? correspondentMap.get(doc.correspondent) || { id: doc.correspondent, name: `#${doc.correspondent}` }
           : null,
-        processedAt: sqliteUtcToIso(processedAt[doc.id]),
+        processedAt: sqliteUtcToIso(processedAt.get(doc.id)),
         link: `${baseURL}/documents/${doc.id}/`
       }))
     });
@@ -1526,6 +1582,7 @@ router.get('/api/documents', async (req, res) => {
  *                   tagMode: { type: string, enum: [any, all] }
  *                   correspondents: { type: array, items: { type: integer } }
  *                   search: { type: string }
+ *                   processed: { type: string, enum: [any, processed, unprocessed] }
  *               fields:
  *                 type: array
  *                 items: { type: string, enum: [title, tags, correspondent] }
@@ -1575,7 +1632,12 @@ router.post('/api/documents/reprocess', async (req, res) => {
       selection = { ids: idList };
     }
 
-    await startReprocessRun(res, () => paperlessService.getDocumentsMatching(selection), { fields: chosenFields });
+    await startReprocessRun(res, async () => {
+      const documents = await paperlessService.getDocumentsMatching(selection);
+      if (!selection.processed || selection.processed === 'any') return documents;
+      const processedAt = await documentModel.getAllProcessedAt();
+      return documents.filter(doc => matchesProcessed(processedAt, selection.processed, doc.id));
+    }, { fields: chosenFields });
   } catch (error) {
     console.error('[ERROR] reprocessing selected documents:', error);
     res.status(500).json({ error: error.message || 'Error reprocessing documents' });

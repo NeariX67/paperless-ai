@@ -168,22 +168,14 @@ module.exports = {
     }
   },
 
-  /**
-   * When each of the given documents was last processed, as { id: processed_at }
-   * (SQLite UTC timestamp). Documents never processed are left out.
-   */
-  async getProcessedAt(documentIds) {
+  /** Every processed document, as a Map of document id -> processed_at (SQLite UTC timestamp). */
+  async getAllProcessedAt() {
     try {
-      const stmt = db.prepare('SELECT processed_at FROM processed_documents WHERE document_id = ?');
-      const result = {};
-      for (const id of documentIds) {
-        const row = stmt.get(id);
-        if (row) result[id] = row.processed_at;
-      }
-      return result;
+      const rows = db.prepare('SELECT document_id, processed_at FROM processed_documents').all();
+      return new Map(rows.map(row => [row.document_id, row.processed_at]));
     } catch (error) {
       console.error('[ERROR] reading processed timestamps:', error);
-      return {};
+      return new Map();
     }
   },
 

@@ -5,6 +5,9 @@ const fs = require('fs');
 const path = require('path');
 const { parse, isValid, parseISO, format } = require('date-fns');
 
+// Fields the documents browser lists (no content, which can be large).
+const DOCUMENT_LIST_FIELDS = 'id,title,created,created_date,added,tags,correspondent';
+
 class PaperlessService {
   constructor() {
     this.client = null;
@@ -959,7 +962,7 @@ class PaperlessService {
         ...this.documentFilterParams(filters),
         page,
         page_size: pageSize,
-        fields: 'id,title,created,created_date,added,tags,correspondent'
+        fields: DOCUMENT_LIST_FIELDS
       }
     });
     return { count: response.data.count, results: response.data.results };
@@ -980,6 +983,37 @@ class PaperlessService {
       if (!response.data.next) break;
     }
     return documents;
+  }
+
+  /**
+   * Ids of every document matching the filters, in the requested ordering.
+   * Paperless-ngx returns them all with any page ("all"), so this is one small
+   * request; older versions without it are paged through.
+   */
+  async getMatchingDocumentIds(filters = {}) {
+    this.initialize();
+    if (!this.client) throw new Error('Paperless client not initialized');
+    const response = await this.client.get('/documents/', {
+      params: { ...this.documentFilterParams(filters), page: 1, page_size: 1, fields: 'id' }
+    });
+    if (Array.isArray(response.data.all)) return response.data.all;
+    return (await this.getDocumentsMatching(filters)).map(doc => doc.id);
+  }
+
+  /** The documents browser's fields for the given ids, in the order of the ids. */
+  async getDocumentsByIds(ids) {
+    this.initialize();
+    if (!this.client) throw new Error('Paperless client not initialized');
+    const byId = new Map();
+    // Chunked so the id__in list keeps the URL short.
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100);
+      const response = await this.client.get('/documents/', {
+        params: { id__in: chunk.join(','), page_size: chunk.length, fields: DOCUMENT_LIST_FIELDS }
+      });
+      for (const doc of response.data.results || []) byId.set(doc.id, doc);
+    }
+    return ids.map(id => byId.get(id)).filter(Boolean);
   }
 
   async getDocumentContent(documentId) {
