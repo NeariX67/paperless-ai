@@ -1304,6 +1304,284 @@ router.get('/api/history', async (req, res) => {
   }
 });
 
+// --- Documents browser -------------------------------------------------------
+
+const DOCUMENT_ORDERINGS = ['created', '-created', 'added', '-added', 'title', '-title',
+  'correspondent__name', '-correspondent__name', 'id', '-id'];
+
+// Tags and correspondents change rarely, and loading them pages through the
+// Paperless API, so the documents browser reuses them for a minute.
+let documentsReferenceCache = { loadedAt: 0, tags: [], correspondents: [] };
+async function getDocumentsReferenceData() {
+  if (Date.now() - documentsReferenceCache.loadedAt > 60000) {
+    const [tags, correspondents] = await Promise.all([
+      paperlessService.getTags(),
+      paperlessService.listCorrespondentsNames()
+    ]);
+    documentsReferenceCache = {
+      loadedAt: Date.now(),
+      tags: tags.map(tag => ({ id: tag.id, name: tag.name, color: tag.color, text_color: tag.text_color }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      correspondents: correspondents.map(c => ({ id: c.id, name: c.name }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    };
+  }
+  return documentsReferenceCache;
+}
+
+/** "1,2,3" or [1, "2"] -> [1, 2, 3]; anything that is not a positive integer is dropped. */
+function parseIdList(value) {
+  const items = Array.isArray(value) ? value : String(value || '').split(',');
+  return items.map(item => parseInt(item, 10)).filter(id => Number.isInteger(id) && id > 0);
+}
+
+/** Filters shared by the document list and "reprocess all matching". */
+function parseDocumentFilters(source = {}) {
+  return {
+    tags: parseIdList(source.tags),
+    tagMode: source.tagMode === 'all' ? 'all' : 'any',
+    correspondents: parseIdList(source.correspondents),
+    search: typeof source.search === 'string' ? source.search.trim().slice(0, 200) : ''
+  };
+}
+
+router.get('/documents', async (req, res) => {
+  try {
+    const { tags, correspondents } = await getDocumentsReferenceData();
+    res.render('documents', {
+      version: configFile.PAPERLESS_AI_VERSION,
+      filters: { tags, correspondents },
+      reprocessFields: scanService.REPROCESS_FIELDS
+    });
+  } catch (error) {
+    console.error('[ERROR] loading documents page:', error);
+    res.status(500).send('Error loading documents page');
+  }
+});
+
+/**
+ * @swagger
+ * /api/documents:
+ *   get:
+ *     summary: List Paperless-ngx documents
+ *     description: |
+ *       Returns one page of all documents in Paperless-ngx (not only the ones
+ *       Paperless-AI processed), filtered by Paperless-ngx itself. Each document
+ *       carries its resolved tags and correspondent and, when Paperless-AI has
+ *       processed it, the time of the last processing.
+ *     tags: [Documents, API]
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 25, maximum: 100 }
+ *       - in: query
+ *         name: tags
+ *         schema: { type: string }
+ *         description: Comma-separated tag ids
+ *         example: "3,7"
+ *       - in: query
+ *         name: tagMode
+ *         schema: { type: string, enum: [any, all], default: any }
+ *         description: Match documents with any of the tags, or with all of them
+ *       - in: query
+ *         name: correspondents
+ *         schema: { type: string }
+ *         description: Comma-separated correspondent ids (any of them)
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Search in title and content
+ *       - in: query
+ *         name: ordering
+ *         schema:
+ *           type: string
+ *           enum: [created, -created, added, -added, title, -title, correspondent__name, -correspondent__name, id, -id]
+ *           default: -created
+ *     responses:
+ *       200:
+ *         description: One page of documents
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 count:
+ *                   type: integer
+ *                   description: Number of documents matching the filters
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer }
+ *                       title: { type: string }
+ *                       created: { type: string }
+ *                       tags:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             id: { type: integer }
+ *                             name: { type: string }
+ *                             color: { type: string }
+ *                             text_color: { type: string }
+ *                       correspondent:
+ *                         type: object
+ *                         nullable: true
+ *                         properties:
+ *                           id: { type: integer }
+ *                           name: { type: string }
+ *                       processedAt:
+ *                         type: string
+ *                         format: date-time
+ *                         nullable: true
+ *                         description: When Paperless-AI last processed the document (UTC)
+ *                       link:
+ *                         type: string
+ *       500:
+ *         description: Paperless-ngx could not be queried
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.get('/api/documents', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+    const ordering = DOCUMENT_ORDERINGS.includes(req.query.ordering) ? req.query.ordering : '-created';
+
+    const [{ count, results }, reference] = await Promise.all([
+      paperlessService.listDocumentsPage({ page, pageSize, ordering, ...parseDocumentFilters(req.query) }),
+      getDocumentsReferenceData()
+    ]);
+    const tagMap = new Map(reference.tags.map(tag => [tag.id, tag]));
+    const correspondentMap = new Map(reference.correspondents.map(c => [c.id, c]));
+    const processedAt = await documentModel.getProcessedAt(results.map(doc => doc.id));
+    const baseURL = process.env.PAPERLESS_API_URL.replace(/\/api$/, '');
+
+    res.json({
+      count,
+      results: results.map(doc => ({
+        id: doc.id,
+        title: doc.title,
+        created: doc.created_date || doc.created,
+        // Tags created after the cache was filled show by id until it refreshes.
+        tags: (doc.tags || []).map(id => tagMap.get(id) || { id, name: `#${id}` }),
+        correspondent: doc.correspondent
+          ? correspondentMap.get(doc.correspondent) || { id: doc.correspondent, name: `#${doc.correspondent}` }
+          : null,
+        processedAt: sqliteUtcToIso(processedAt[doc.id]),
+        link: `${baseURL}/documents/${doc.id}/`
+      }))
+    });
+  } catch (error) {
+    console.error('[ERROR] listing documents:', error.message);
+    res.status(500).json({ error: 'Failed to load documents from Paperless-ngx' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/documents/reprocess:
+ *   post:
+ *     summary: Reprocess selected documents
+ *     description: |
+ *       Analyses the given documents again and updates only the chosen fields
+ *       (title, tags, correspondent) in Paperless-ngx. Tags the previous
+ *       Paperless-AI run added are replaced by the new ones; the document's
+ *       original tags and tags added by hand are kept. The new correspondent
+ *       replaces an existing one. Date, document type and custom fields are not
+ *       changed.
+ *
+ *       Pass either `ids`, or `filter` to reprocess every document matching the
+ *       same filters as GET /api/documents. The run starts in the background;
+ *       follow it through /api/processing-status (the `run` object).
+ *     tags: [Documents, API]
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [fields]
+ *             properties:
+ *               ids:
+ *                 type: array
+ *                 items: { type: integer }
+ *                 example: [12, 15]
+ *               filter:
+ *                 type: object
+ *                 properties:
+ *                   tags: { type: array, items: { type: integer } }
+ *                   tagMode: { type: string, enum: [any, all] }
+ *                   correspondents: { type: array, items: { type: integer } }
+ *                   search: { type: string }
+ *               fields:
+ *                 type: array
+ *                 items: { type: string, enum: [title, tags, correspondent] }
+ *                 example: [title, tags, correspondent]
+ *     responses:
+ *       200:
+ *         description: Run started
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 started: { type: boolean }
+ *                 totalDocuments: { type: integer }
+ *       400:
+ *         description: No documents or no fields given
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: A processing run is already active
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/api/documents/reprocess', async (req, res) => {
+  try {
+    const { ids, filter, fields } = req.body || {};
+    const chosenFields = Array.isArray(fields)
+      ? scanService.REPROCESS_FIELDS.filter(field => fields.includes(field))
+      : [];
+    if (!chosenFields.length) {
+      return res.status(400).json({ error: `Choose at least one field to update: ${scanService.REPROCESS_FIELDS.join(', ')}` });
+    }
+
+    let selection;
+    if (filter && typeof filter === 'object') {
+      selection = parseDocumentFilters(filter);
+    } else {
+      const idList = parseIdList(ids);
+      if (!idList.length) {
+        return res.status(400).json({ error: 'Select at least one document' });
+      }
+      selection = { ids: idList };
+    }
+
+    await startReprocessRun(res, () => paperlessService.getDocumentsMatching(selection), { fields: chosenFields });
+  } catch (error) {
+    console.error('[ERROR] reprocessing selected documents:', error);
+    res.status(500).json({ error: error.message || 'Error reprocessing documents' });
+  }
+});
+
 /**
  * @swagger
  * /api/reset-all-documents:
@@ -1468,50 +1746,65 @@ router.post('/api/reprocess-all', async (req, res) => {
       });
     }
 
-    // Take the lock before resetting anything. Checking isRunning() first and
-    // acquiring later left a window (the slow document fetch) in which the cron
-    // scan or a second click could start a run after the reset had already
-    // cleared the processed flags. The webhook queue holds this lock too.
-    if (!taskLock.tryAcquire()) {
-      return res.status(409).json({ error: 'A processing run is already active' });
-    }
-
-    let handedOff = false;
-    try {
-      const target = selectTarget(await paperlessService.getAllDocuments());
-
-      // Reset only the documents this run covers: clearing every flag would make
-      // the next regular scan reprocess the rest whenever `limit` is set.
-      const reset = await documentModel.resetProcessedDocuments({
-        documentIds: target.map(doc => doc.id),
-        keepHistory
-      });
-      if (!reset) {
-        return res.status(500).json({ error: 'Failed to reset processing records' });
-      }
-
-      // Run without blocking the response; the dashboard polls
-      // /api/processing-status for live counters and the run status.
-      // runWithHeldLock takes over the lock and releases it when done.
-      scanService.runWithHeldLock(target, { force: true, kind: 'reprocess' }).catch(error => {
-        console.error('[ERROR] reprocess run failed:', error.message);
-      });
-      handedOff = true;
-
-      res.json({
-        success: true,
-        started: true,
-        totalDocuments: target.length,
-        reset
-      });
-    } finally {
-      if (!handedOff) taskLock.release();
-    }
+    await startReprocessRun(res, async () => selectTarget(await paperlessService.getAllDocuments()), { keepHistory });
   } catch (error) {
     console.error('[ERROR] reprocessing all documents:', error);
     res.status(500).json({ error: error.message || 'Error reprocessing documents' });
   }
 });
+
+/**
+ * Start a reprocess run and answer the request. Shared by reprocess-all and
+ * the documents page.
+ *
+ * Takes the task lock before resetting anything: checking isRunning() first and
+ * acquiring later left a window (the slow document fetch) in which the cron
+ * scan or a second click could start a run after the reset had already cleared
+ * the processed flags. The webhook queue holds this lock too.
+ *
+ * loadDocuments() returns the documents to reprocess. opts.fields limits the
+ * update to those fields (see scanService.buildUpdateData).
+ */
+async function startReprocessRun(res, loadDocuments, { keepHistory = true, fields = null } = {}) {
+  if (!taskLock.tryAcquire()) {
+    return res.status(409).json({ error: 'A processing run is already active' });
+  }
+
+  let handedOff = false;
+  try {
+    const target = await loadDocuments();
+    if (!target.length) {
+      return res.status(400).json({ error: 'No documents to reprocess' });
+    }
+
+    // Reset only the documents this run covers: clearing every flag would make
+    // the next regular scan reprocess everything else.
+    const reset = await documentModel.resetProcessedDocuments({
+      documentIds: target.map(doc => doc.id),
+      keepHistory
+    });
+    if (!reset) {
+      return res.status(500).json({ error: 'Failed to reset processing records' });
+    }
+
+    // Run without blocking the response; the UI polls /api/processing-status
+    // for live counters and the run status. runWithHeldLock takes over the lock
+    // and releases it when done.
+    scanService.runWithHeldLock(target, { force: true, kind: 'reprocess', fields }).catch(error => {
+      console.error('[ERROR] reprocess run failed:', error.message);
+    });
+    handedOff = true;
+
+    res.json({
+      success: true,
+      started: true,
+      totalDocuments: target.length,
+      reset
+    });
+  } finally {
+    if (!handedOff) taskLock.release();
+  }
+}
 
 /**
  * @swagger
@@ -4217,7 +4510,10 @@ router.post('/settings', express.json(), async (req, res) => {
       ...updatedConfig
     };
 
-    await setupService.saveConfig(mergedConfig);
+    // A changed provider chain was already tested above (saveProviderChain);
+    // testing again here would block saving other settings while a provider
+    // is down.
+    await setupService.saveConfig(mergedConfig, { checkProviders: false });
     try {
       for (const field of processedCustomFields) {
         await paperlessService.createCustomFieldSafely(field.value, field.data_type, field.currency);
@@ -4372,6 +4668,12 @@ async function saveProviderChain(input) {
   } catch (error) {
     if (error instanceof providerRegistry.ChainError) return { error: error.message };
     throw error;
+  }
+  // The settings form always submits the chain. When it is unchanged (other
+  // settings were edited) don't require a provider to answer, so settings stay
+  // savable while a provider is down.
+  if (providerRegistry.sameChain(chain, await providerRegistry.getProviders())) {
+    return { saved: await providerRegistry.saveProviders(chain) };
   }
   const { ok, errors } = await providerRegistry.validateChain(chain);
   if (!ok) {

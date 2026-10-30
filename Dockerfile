@@ -24,7 +24,14 @@ RUN npm install pm2 -g
 COPY requirements.txt /app/
 RUN python3 -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+# Optional CPU-only torch index (set via --build-arg PIP_EXTRA_INDEX_URL).
+# --extra-index-url alone is not enough: pip picks the highest version across all
+# indexes, so `torch>=2.0.0` still resolves the CUDA wheel (~4.6 GB) on CPU-only hosts.
+# Install torch from the CPU index first, then requirements.txt sees it already satisfied.
+ARG PIP_EXTRA_INDEX_URL=
+RUN pip install --upgrade pip && \
+    if [ -n "$PIP_EXTRA_INDEX_URL" ]; then pip install --no-cache-dir --index-url "$PIP_EXTRA_INDEX_URL" "torch>=2.0.0"; fi && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy package files for dependency installation
 COPY package*.json ./

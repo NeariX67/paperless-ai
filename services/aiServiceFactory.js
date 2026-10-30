@@ -42,7 +42,6 @@ class AIServiceFactory {
   static async execute(fn, opts = {}) {
     const chain = await providerRegistry.getChain();
     const errors = [];
-    const skipped = [];
 
     const attempt = async (entry) => {
       const service = this.getServiceFor(entry);
@@ -80,7 +79,6 @@ class AIServiceFactory {
       // Circuit breaker: skip providers known to be unhealthy unless the caller
       // explicitly asks to try them anyway (opts.allowUnhealthy === true).
       if (opts.allowUnhealthy !== true && providerRegistry.isUnhealthy(entry)) {
-        skipped.push(entry);
         errors.push(`${entry.name}: skipped (unhealthy: ${providerRegistry.getHealth()[entry.id]?.lastError || 'no result yet'})`);
         continue;
       }
@@ -88,17 +86,11 @@ class AIServiceFactory {
       if (outcome.done) return outcome.result;
     }
 
-    // Half-open: when every provider was skipped as unhealthy, nothing was
-    // tried at all. Probe the one that failed longest ago instead of failing
-    // outright, so a single-provider setup recovers on its own.
-    if (skipped.length && skipped.length === chain.length) {
-      const health = providerRegistry.getHealth();
-      const probe = skipped.reduce((oldest, entry) =>
-        (health[entry.id]?.checkedAt || 0) < (health[oldest.id]?.checkedAt || 0) ? entry : oldest);
-      const outcome = await attempt(probe);
-      if (outcome.done) return outcome.result;
-    }
-
+    // When every provider is marked unhealthy, fail fast: an unhealthy entry is
+    // tried again once its health mark expires (HEALTH_TTL_MS), so a down
+    // provider costs one attempt per minute instead of one per document.
+    // Documents that fail here are not marked processed and are retried by the
+    // next scan.
     throw new Error(`All providers failed: ${errors.join(' | ')}`);
   }
 }

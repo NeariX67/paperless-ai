@@ -10,6 +10,7 @@ class SetupService {
   constructor() {
     this.envPath = path.join(process.cwd(), 'data', '.env');
     this.configured = null; // Variable to store the configuration status
+    this.configuring = null; // In-flight isConfigured() check, shared by concurrent callers
   }
 
   async loadConfig() {
@@ -152,29 +153,27 @@ class SetupService {
     }
   }
 
-  async validateConfig(config) {
+  /**
+   * opts.checkProviders (default true) also requires a reachable AI provider.
+   * The startup/setup-complete check passes false: an AI provider being down
+   * is a runtime problem the provider chain handles, and must not lock users
+   * out of the UI (including Settings, where they would fix it).
+   */
+  async validateConfig(config, { checkProviders = true } = {}) {
     // Validate Paperless config
     const paperlessApiUrl = config.PAPERLESS_API_URL.replace(/\/api/g, '');
     const paperlessValid = await this.validatePaperlessConfig(
       paperlessApiUrl,
       config.PAPERLESS_API_TOKEN
     );
-    
+
     if (!paperlessValid) {
       throw new Error('Invalid Paperless configuration');
     }
 
-    // Validate the provider chain: the config is valid when at least one
-    // enabled provider answers. A submitted chain (form body) is authoritative
-    // during setup/save; otherwise providers.json, then a legacy entry built
-    // from the config being validated (not process.env, which is still stale
-    // while the setup form is being saved).
-    const providers = Array.isArray(config.providers) && config.providers.length
-      ? config.providers
-      : (await providerRegistry.loadSaved()) || [providerRegistry.legacyEntry(config)];
-    // Stop at the first reachable provider: this runs on every startup, and
-    // testing the whole chain would cost a request per provider each time.
-    const { ok, errors } = await providerRegistry.validateChain(providers, { stopAtFirst: true });
+    if (!checkProviders) return true;
+
+    const { ok, errors } = await this.checkProviders(config);
     if (!ok) {
       throw new Error(`No provider is reachable: ${errors.join(' | ')}`);
     }
@@ -182,10 +181,25 @@ class SetupService {
     return true;
   }
 
-  async saveConfig(config) {
+  /**
+   * Test the provider chain: ok when at least one enabled provider answers.
+   * A submitted chain (form body) is authoritative during setup/save; otherwise
+   * providers.json, then a legacy entry built from the given config (not
+   * process.env, which is still stale while the setup form is being saved).
+   * Stops at the first reachable provider, so it costs one request when healthy.
+   */
+  async checkProviders(config) {
+    const providers = Array.isArray(config.providers) && config.providers.length
+      ? config.providers
+      : (await providerRegistry.loadSaved()) || [providerRegistry.legacyEntry(config)];
+    return providerRegistry.validateChain(providers, { stopAtFirst: true });
+  }
+
+  /** opts.checkProviders: see validateConfig. */
+  async saveConfig(config, opts = {}) {
     try {
       // Validate the new configuration before saving
-      await this.validateConfig(config);
+      await this.validateConfig(config, opts);
 
       const JSON_STANDARD_PROMPT = `
         Return the result EXCLUSIVELY as a JSON object. The Tags and Title MUST be in the language that is used in the document.:
@@ -227,7 +241,17 @@ class SetupService {
     if (this.configured !== null) {
       return this.configured;
     }
+    // Every request runs this check until it has an answer: share one run
+    // instead of starting a separate retry loop per request.
+    if (!this.configuring) {
+      this.configuring = this.checkConfigured().finally(() => {
+        this.configuring = null;
+      });
+    }
+    return this.configuring;
+  }
 
+  async checkConfigured() {
     const maxAttempts = 60; // 5 minutes = 300 seconds, attempting every 5 seconds = 60 attempts
     const delayBetweenAttempts = 5000; // 5 seconds in milliseconds
     let attempts = 0;
@@ -273,8 +297,19 @@ class SetupService {
           throw new Error('Failed to load configuration');
         }
 
-        await this.validateConfig(config);
+        // Paperless only: see validateConfig. AI providers are checked in the
+        // background below, so a down provider is logged and shows in Settings
+        // without blocking the app.
+        await this.validateConfig(config, { checkProviders: false });
         this.configured = true;
+        this.checkProviders(config)
+          .then(({ ok, errors }) => {
+            if (!ok) {
+              console.warn(`[WARN] No AI provider is reachable: ${errors.join(' | ')}. ` +
+                'Documents fail until one is; change providers in Settings.');
+            }
+          })
+          .catch(error => console.error('[ERROR] checking AI providers:', error.message));
         return true;
       } catch (error) {
         console.error('Configuration attempt failed:', error.message);

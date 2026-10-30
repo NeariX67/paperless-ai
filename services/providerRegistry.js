@@ -152,6 +152,16 @@ class ProviderRegistry {
     });
   }
 
+  /** Whether two chains configure the same providers (display names aside). */
+  sameChain(a, b) {
+    const canonical = list => JSON.stringify(list.map(p => [
+      p.id, p.type, Number(p.priority) || 0, p.enabled !== false, p.model || '', p.apiKey || '',
+      cleanBaseUrl(p.type, p.baseUrl), p.endpoint || '', p.deploymentName || '',
+      p.type === 'azure' ? (p.apiVersion || '2023-05-15') : ''
+    ]).sort());
+    return canonical(a) === canonical(b);
+  }
+
   /** Copy of a chain with API keys replaced by a placeholder, for clients. */
   maskKeys(list) {
     return list.map(p => ({ ...p, apiKey: p.apiKey ? MASKED_KEY : '' }));

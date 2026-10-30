@@ -935,6 +935,53 @@ class PaperlessService {
     return this.getAllDocuments();
   }
 
+  /**
+   * Paperless query parameters for the documents browser filters.
+   * filters: { ids, tags, tagMode ('any' | 'all'), correspondents, search, ordering }
+   * (ids, tags and correspondents are arrays of numeric ids).
+   */
+  documentFilterParams({ ids = [], tags = [], tagMode = 'any', correspondents = [], search = '', ordering } = {}) {
+    const params = {};
+    if (ids.length) params.id__in = ids.join(',');
+    if (tags.length) params[tagMode === 'all' ? 'tags__id__all' : 'tags__id__in'] = tags.join(',');
+    if (correspondents.length) params.correspondent__id__in = correspondents.join(',');
+    if (search) params.title_content = search;
+    if (ordering) params.ordering = ordering;
+    return params;
+  }
+
+  /** One page of documents matching the filters, for the documents browser. */
+  async listDocumentsPage({ page = 1, pageSize = 25, ...filters } = {}) {
+    this.initialize();
+    if (!this.client) throw new Error('Paperless client not initialized');
+    const response = await this.client.get('/documents/', {
+      params: {
+        ...this.documentFilterParams(filters),
+        page,
+        page_size: pageSize,
+        fields: 'id,title,created,created_date,added,tags,correspondent'
+      }
+    });
+    return { count: response.data.count, results: response.data.results };
+  }
+
+  /**
+   * Every document matching the filters (all pages). Unlike getAllDocuments()
+   * this ignores PROCESS_PREDEFINED_DOCUMENTS: it serves an explicit selection.
+   */
+  async getDocumentsMatching(filters = {}) {
+    this.initialize();
+    if (!this.client) throw new Error('Paperless client not initialized');
+    const params = { ...this.documentFilterParams(filters), page_size: 100, fields: 'id,title,created,tags,correspondent' };
+    let documents = [];
+    for (let page = 1; ; page++) {
+      const response = await this.client.get('/documents/', { params: { ...params, page } });
+      documents = documents.concat(response.data.results || []);
+      if (!response.data.next) break;
+    }
+    return documents;
+  }
+
   async getDocumentContent(documentId) {
     this.initialize();
     const response = await this.client.get(`/documents/${documentId}/`);
@@ -1261,25 +1308,33 @@ async getOrCreateDocumentType(name) {
   }
 
 
-  async updateDocument(documentId, updates) {
+  /**
+   * Patch a document. By default new tags are added to the current ones and an
+   * existing correspondent is kept. A reprocess run passes options to change that:
+   * - removeTagIds: tags to drop before adding the new ones (the previous run's AI tags)
+   * - overwriteCorrespondent: replace an existing correspondent
+   */
+  async updateDocument(documentId, updates, options = {}) {
     this.initialize();
     if (!this.client) return;
     try {
       const currentDoc = await this.getDocument(documentId);
-      
+
       if (updates.tags) {
         console.log(`[DEBUG] Current tags for document ${documentId}:`, currentDoc.tags);
         console.log(`[DEBUG] Adding new tags:`, updates.tags);
         console.log(`[DEBUG] Current correspondent:`, currentDoc.correspondent);
         console.log(`[DEBUG] New correspondent:`, updates.correspondent);
-                
-        const combinedTags = [...new Set([...currentDoc.tags, ...updates.tags])];
+
+        const removeTagIds = new Set(options.removeTagIds || []);
+        const keptTags = currentDoc.tags.filter(id => !removeTagIds.has(id));
+        const combinedTags = [...new Set([...keptTags, ...updates.tags])];
         updates.tags = combinedTags;
-        
+
         console.log(`[DEBUG] Combined tags:`, combinedTags);
       }
 
-      if (currentDoc.correspondent && updates.correspondent) {
+      if (currentDoc.correspondent && updates.correspondent && !options.overwriteCorrespondent) {
         console.log('[DEBUG] Document already has a correspondent, keeping existing one:', currentDoc.correspondent);
         delete updates.correspondent;
       }

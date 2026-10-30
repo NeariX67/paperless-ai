@@ -168,6 +168,25 @@ module.exports = {
     }
   },
 
+  /**
+   * When each of the given documents was last processed, as { id: processed_at }
+   * (SQLite UTC timestamp). Documents never processed are left out.
+   */
+  async getProcessedAt(documentIds) {
+    try {
+      const stmt = db.prepare('SELECT processed_at FROM processed_documents WHERE document_id = ?');
+      const result = {};
+      for (const id of documentIds) {
+        const row = stmt.get(id);
+        if (row) result[id] = row.processed_at;
+      }
+      return result;
+    } catch (error) {
+      console.error('[ERROR] reading processed timestamps:', error);
+      return {};
+    }
+  },
+
   async addOpenAIMetrics(documentId, promptTokens, completionTokens, totalTokens) {
     try {
       const result = insertMetrics.run(documentId, promptTokens, completionTokens, totalTokens);

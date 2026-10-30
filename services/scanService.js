@@ -107,7 +107,54 @@ async function processDocument(doc, existingTags, existingCorrespondentList, exi
   return { analysis, originalData };
 }
 
-async function buildUpdateData(analysis, doc) {
+// Fields a reprocess run can update (documents page).
+const REPROCESS_FIELDS = ['title', 'tags', 'correspondent'];
+
+/**
+ * Reprocess of chosen fields: apply exactly those fields from the analysis,
+ * whatever the activate* settings say (the user picked them explicitly), and
+ * leave everything else (date, document type, custom fields) untouched.
+ */
+async function buildFieldUpdate(analysis, fields) {
+  const updateData = {};
+  const options = {
+    restrictToExistingTags: config.restrictToExistingTags === 'yes',
+    restrictToExistingCorrespondents: config.restrictToExistingCorrespondents === 'yes'
+  };
+
+  if (fields.includes('title') && analysis.document.title) {
+    updateData.title = analysis.document.title;
+  }
+
+  if (fields.includes('tags')) {
+    const { tagIds, errors } = await paperlessService.processTags(analysis.document.tags || [], options);
+    if (errors.length > 0) {
+      console.warn('[ERROR] Some tags could not be processed:', errors);
+    }
+    updateData.tags = tagIds;
+  }
+
+  if (fields.includes('correspondent') && analysis.document.correspondent) {
+    try {
+      const correspondent = await paperlessService.getOrCreateCorrespondent(analysis.document.correspondent, options);
+      if (correspondent) {
+        updateData.correspondent = correspondent.id;
+      }
+    } catch (error) {
+      console.error(`[ERROR] Error processing correspondent:`, error);
+    }
+  }
+
+  return updateData;
+}
+
+/**
+ * opts.fields (reprocess from the documents page) limits the update to those
+ * fields; otherwise the activate* settings decide, as for a regular scan.
+ */
+async function buildUpdateData(analysis, doc, opts = {}) {
+  if (opts.fields) return buildFieldUpdate(analysis, opts.fields);
+
   const updateData = {};
 
   // Create options object with restriction settings
@@ -221,13 +268,53 @@ async function buildUpdateData(analysis, doc) {
   return updateData;
 }
 
-async function saveDocumentChanges(docId, updateData, analysis, originalData) {
+function parseTagIds(json) {
+  try {
+    const ids = JSON.parse(json || '[]');
+    return Array.isArray(ids) ? ids.map(Number) : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+/**
+ * Tags the previous AI run added: the tags in its history row that the
+ * document did not have originally. A reprocess replaces these with the new
+ * AI tags; original tags and tags added by hand stay on the document.
+ */
+async function previousAiTagIds(docId) {
+  const [history, original] = await Promise.all([
+    documentModel.getHistory(docId),
+    documentModel.getOriginalData(docId)
+  ]);
+  const originalTags = new Set(parseTagIds(original && original.tags));
+  return parseTagIds(history && history.tags).filter(id => !originalTags.has(id));
+}
+
+async function saveDocumentChanges(docId, updateData, analysis, originalData, opts = {}) {
   const { tags: originalTags, correspondent: originalCorrespondent, title: originalTitle } = originalData;
+
+  // Regular scans only add tags and keep an existing correspondent. A field
+  // reprocess replaces the previous AI tags and the correspondent, and keeps
+  // the history row's values for fields it did not touch.
+  let updateOptions = {};
+  let historyTags = updateData.tags;
+  let historyCorrespondent = analysis.document.correspondent;
+  if (opts.fields) {
+    const previous = await documentModel.getHistory(docId);
+    updateOptions = {
+      overwriteCorrespondent: opts.fields.includes('correspondent'),
+      removeTagIds: opts.fields.includes('tags') ? await previousAiTagIds(docId) : []
+    };
+    if (!opts.fields.includes('tags')) historyTags = parseTagIds(previous && previous.tags);
+    if (!opts.fields.includes('correspondent')) historyCorrespondent = previous ? previous.correspondent : null;
+  }
+  const title = updateData.title || originalTitle;
 
   await Promise.all([
     documentModel.saveOriginalData(docId, originalTags, originalCorrespondent, originalTitle),
-    paperlessService.updateDocument(docId, updateData),
-    documentModel.addProcessedDocument(docId, updateData.title),
+    paperlessService.updateDocument(docId, { ...updateData }, updateOptions),
+    documentModel.addProcessedDocument(docId, title),
     // Ollama and some providers report no token usage (metrics: null), so only
     // record metrics when the analysis actually carries them.
     analysis.metrics
@@ -238,7 +325,7 @@ async function saveDocumentChanges(docId, updateData, analysis, originalData) {
         analysis.metrics.totalTokens
       )
       : Promise.resolve(false),
-    documentModel.addToHistory(docId, updateData.tags, updateData.title, analysis.document.correspondent)
+    documentModel.addToHistory(docId, historyTags, title, historyCorrespondent)
   ]);
 }
 
@@ -311,8 +398,8 @@ async function runWithHeldLock(documents, opts = {}) {
         }
 
         const { analysis, originalData } = result;
-        const updateData = await buildUpdateData(analysis, doc);
-        await saveDocumentChanges(doc.id, updateData, analysis, originalData);
+        const updateData = await buildUpdateData(analysis, doc, opts);
+        await saveDocumentChanges(doc.id, updateData, analysis, originalData, opts);
         stats.processed++;
       } catch (error) {
         stats.failed++;
@@ -346,5 +433,6 @@ module.exports = {
   getRunStatus,
   getLastRun: () => lastRun,
   collectContext,
+  REPROCESS_FIELDS,
   taskLock
 };
