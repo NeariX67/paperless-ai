@@ -164,9 +164,15 @@
                 </div>
 
                 <!-- Run progress (reprocess / scan) -->
-                <div id="runBanner" class="hidden mb-4 px-4 py-3 rounded-lg border border-blue-300 bg-blue-50 text-blue-900 text-sm">
-                    <i id="runBannerIcon" class="fas fa-spinner fa-spin mr-2"></i>
-                    <span id="runBannerText"></span>
+                <div id="runBanner" class="hidden flex items-center gap-3 mb-4 px-4 py-3 rounded-lg border border-blue-300 bg-blue-50 text-blue-900 text-sm">
+                    <div class="flex-1">
+                        <i id="runBannerIcon" class="fas fa-spinner fa-spin mr-2"></i>
+                        <span id="runBannerText"></span>
+                    </div>
+                    <button id="stopRun" class="hidden px-3 py-1 rounded-lg bg-gray-700 text-white hover:bg-gray-800 whitespace-nowrap"
+                            title="Stop the run after the current document">
+                        <i class="fas fa-stop mr-1"></i><span id="stopRunText">Stop</span>
+                    </button>
                 </div>
 
                 <!-- Selection and actions -->

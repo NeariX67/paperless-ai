@@ -58,6 +58,7 @@ class DocumentsPage {
         this.initializeFilters();
         this.initializeSelection();
         this.initializeReprocessModal();
+        this.initializeStopButton();
         this.pollRunStatus();
     }
 
@@ -340,6 +341,34 @@ class DocumentsPage {
         });
     }
 
+    initializeStopButton() {
+        document.getElementById('stopRun').addEventListener('click', async (event) => {
+            const button = event.currentTarget;
+            if (button.disabled) return;
+            button.disabled = true;
+            try {
+                const response = await fetch('/api/processing/stop', { method: 'POST' });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(result.error || 'Stopping the run failed');
+            } catch (error) {
+                console.error('Stop failed:', error);
+                button.disabled = false;
+            }
+            this.pollRunStatus();
+        });
+    }
+
+    // Stop shows while a run is active; once asked, it waits for the current
+    // document to finish.
+    updateStopButton(run) {
+        const button = document.getElementById('stopRun');
+        const stopRequested = !!(run && run.current && run.current.stopRequested);
+        button.classList.toggle('hidden', !(run && run.running));
+        button.disabled = stopRequested;
+        button.classList.toggle('opacity-50', stopRequested);
+        document.getElementById('stopRunText').textContent = stopRequested ? 'Stopping…' : 'Stop';
+    }
+
     showRunBanner(text, state) {
         const banner = document.getElementById('runBanner');
         const icon = document.getElementById('runBannerIcon');
@@ -365,6 +394,7 @@ class DocumentsPage {
             const status = await response.json();
             const run = status.run || {};
             const active = !!run.running;
+            this.updateStopButton(run);
 
             if (active && run.current) {
                 const doc = status.currentlyProcessing;
@@ -372,16 +402,18 @@ class DocumentsPage {
                 this.showRunBanner(
                     `${run.current.kind === 'reprocess' ? 'Reprocessing' : 'Scanning'}: ${done} of ${run.current.total} done` +
                     ` (${run.current.processed} updated, ${run.current.skipped} skipped, ${run.current.failed} failed)` +
-                    (doc ? ` — now: ${doc.title}` : ''),
+                    (run.current.stopRequested ? ' — stopping after the current document' : doc ? ` — now: ${doc.title}` : ''),
                     'running'
                 );
             } else if (active) {
                 this.showRunBanner('Paperless-AI is processing documents…', 'running');
             } else if (this.runWasActive && run.last) {
                 const last = run.last;
+                const notReached = last.total - last.processed - last.skipped - last.failed;
                 this.showRunBanner(
-                    `${last.kind === 'reprocess' ? 'Reprocess' : 'Scan'} finished: ${last.processed} updated, ` +
-                    `${last.skipped} skipped, ${last.failed} failed of ${last.total}.`,
+                    `${last.kind === 'reprocess' ? 'Reprocess' : 'Scan'} ${last.stopped ? 'stopped' : 'finished'}: ` +
+                    `${last.processed} updated, ${last.skipped} skipped, ${last.failed} failed of ${last.total}` +
+                    (last.stopped ? `; ${notReached} not reached and left unchanged.` : '.'),
                     last.failed ? 'error' : 'done'
                 );
                 this.table.ajax.reload(null, false);

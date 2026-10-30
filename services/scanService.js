@@ -353,6 +353,8 @@ async function collectContext() {
 /**
  * Run the pipeline over a document list.
  * opts.force re-processes already-processed documents (reprocess-all).
+ * opts.dropHistory clears each document's history before it is reprocessed.
+ * requestStop() ends the run after the current document.
  * Holds the shared task lock for the duration, so a manual run can never overlap
  * the cron scan or the webhook queue.
  * Returns per-run counters so the caller can report progress.
@@ -388,7 +390,16 @@ async function runWithHeldLock(documents, opts = {}) {
       await collectContext();
 
     for (const doc of documents) {
+      if (stats.stopRequested) {
+        stats.stopped = true;
+        break;
+      }
       try {
+        // Reprocess without history: forget this document's history right
+        // before analysing it again (not for the whole list up front), so a
+        // stopped run leaves the documents it did not reach untouched.
+        if (opts.dropHistory) await documentModel.clearHistory(doc.id);
+
         const result = await processDocument(
           doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId, null, opts
         );
@@ -415,6 +426,16 @@ async function runWithHeldLock(documents, opts = {}) {
   return stats;
 }
 
+/**
+ * Ask the active run to stop: it finishes the document it is on and processes
+ * no further ones. Returns false when no run is active.
+ */
+function requestStop() {
+  if (!currentRun) return false;
+  currentRun.stopRequested = true;
+  return true;
+}
+
 /** Live + last-run counters for the UI. */
 function getRunStatus() {
   return {
@@ -430,6 +451,7 @@ module.exports = {
   saveDocumentChanges,
   scanAll,
   runWithHeldLock,
+  requestStop,
   getRunStatus,
   getLastRun: () => lastRun,
   collectContext,

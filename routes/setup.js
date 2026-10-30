@@ -1710,13 +1710,12 @@ router.post('/api/reset-all-documents', async (req, res) => {
  *   post:
  *     summary: Reset and re-process every document
  *     description: |
- *       Clears the processing flags for all documents and runs the full pipeline
- *       again, so every document is analysed with the current provider chain,
- *       prompt and restrictions. Useful after changing the AI model, the provider
- *       chain or the system prompt.
+ *       Runs the full pipeline again over every document, processed or not, so
+ *       each is analysed with the current provider chain, prompt and
+ *       restrictions. Useful after changing the AI model, the provider chain or
+ *       the system prompt. POST /api/processing/stop ends the run early.
  *
- *       Only the processing state is reset — documents themselves are never
- *       deleted from Paperless-ngx. Metadata that a re-analysis produces is
+ *       Documents themselves are never deleted from Paperless-ngx. Metadata that a re-analysis produces is
  *       written to Paperless-ngx, so this call modifies live documents unless
  *       `dryRun` is used.
  *
@@ -1746,10 +1745,10 @@ router.post('/api/reset-all-documents', async (req, res) => {
  *               dryRun:
  *                 type: boolean
  *                 default: false
- *                 description: Count the documents that would be reprocessed without resetting anything or writing to Paperless-ngx.
+ *                 description: Count the documents that would be reprocessed without writing anything.
  *               limit:
  *                 type: integer
- *                 description: Process at most this many documents (useful for a test batch before a full run). Only these documents are reset; the rest keep their processed state.
+ *                 description: Process at most this many documents (useful for a test batch before a full run). The rest are not touched.
  *     responses:
  *       200:
  *         description: Run started (or counted, for a dry run)
@@ -1766,9 +1765,6 @@ router.post('/api/reset-all-documents', async (req, res) => {
  *                   type: boolean
  *                 totalDocuments:
  *                   type: integer
- *                 reset:
- *                   type: object
- *                   description: Counters removed from the processing tables
  *       401:
  *         description: Unauthorized - authentication required
  *         content:
@@ -1804,7 +1800,7 @@ router.post('/api/reprocess-all', async (req, res) => {
         success: true,
         dryRun: true,
         totalDocuments: selectTarget(documents).length,
-        note: 'Nothing was reset or written. Remove dryRun to run the reprocess.'
+        note: 'Nothing was written. Remove dryRun to run the reprocess.'
       });
     }
 
@@ -1819,10 +1815,9 @@ router.post('/api/reprocess-all', async (req, res) => {
  * Start a reprocess run and answer the request. Shared by reprocess-all and
  * the documents page.
  *
- * Takes the task lock before resetting anything: checking isRunning() first and
- * acquiring later left a window (the slow document fetch) in which the cron
- * scan or a second click could start a run after the reset had already cleared
- * the processed flags. The webhook queue holds this lock too.
+ * Takes the task lock before loading the documents, so the cron scan or a
+ * second click cannot start a run during the (slow) document fetch. The
+ * webhook queue holds this lock too.
  *
  * loadDocuments() returns the documents to reprocess. opts.fields limits the
  * update to those fields (see scanService.buildUpdateData).
@@ -1839,20 +1834,16 @@ async function startReprocessRun(res, loadDocuments, { keepHistory = true, field
       return res.status(400).json({ error: 'No documents to reprocess' });
     }
 
-    // Reset only the documents this run covers: clearing every flag would make
-    // the next regular scan reprocess everything else.
-    const reset = await documentModel.resetProcessedDocuments({
-      documentIds: target.map(doc => doc.id),
-      keepHistory
-    });
-    if (!reset) {
-      return res.status(500).json({ error: 'Failed to reset processing records' });
-    }
-
+    // Nothing is reset up front: force analyses processed documents anyway, and
+    // history is dropped per document as the run reaches it (dropHistory). So
+    // a stopped run, a restart or a failed document leaves the documents it did
+    // not get to exactly as they were, instead of handing them to the next
+    // regular scan as unprocessed.
+    //
     // Run without blocking the response; the UI polls /api/processing-status
     // for live counters and the run status. runWithHeldLock takes over the lock
     // and releases it when done.
-    scanService.runWithHeldLock(target, { force: true, kind: 'reprocess', fields }).catch(error => {
+    scanService.runWithHeldLock(target, { force: true, kind: 'reprocess', fields, dropHistory: !keepHistory }).catch(error => {
       console.error('[ERROR] reprocess run failed:', error.message);
     });
     handedOff = true;
@@ -1860,13 +1851,51 @@ async function startReprocessRun(res, loadDocuments, { keepHistory = true, field
     res.json({
       success: true,
       started: true,
-      totalDocuments: target.length,
-      reset
+      totalDocuments: target.length
     });
   } finally {
     if (!handedOff) taskLock.release();
   }
 }
+
+/**
+ * @swagger
+ * /api/processing/stop:
+ *   post:
+ *     summary: Stop the active processing run
+ *     description: |
+ *       Stops the active scan or reprocess run. The document being analysed
+ *       is finished (an AI request in flight is not cut off), then the run
+ *       ends; the documents it did not reach are left as they were. The run's
+ *       `stopRequested` and, once it has ended, `stopped` flags show in
+ *       /api/processing-status.
+ *     tags: [Documents, API]
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Stop requested
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *       409:
+ *         description: No run is active
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/api/processing/stop', (req, res) => {
+  if (!scanService.requestStop()) {
+    return res.status(409).json({ error: 'No processing run is active' });
+  }
+  console.log('[INFO] Stop requested; the run ends after the current document');
+  res.json({ success: true });
+});
 
 /**
  * @swagger

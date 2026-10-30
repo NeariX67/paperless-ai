@@ -131,10 +131,19 @@
                             id="reprocessButton"
                             class="flex items-center gap-2 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg transition-colors"
                             onclick="showReprocessConfirm()"
-                            title="Reset the processing state of every document and analyse them again with the current provider and prompt"
+                            title="Analyse every document again with the current provider and prompt"
                         >
                             <i class="fas fa-redo"></i>
                             <span>Reprocess All</span>
+                        </button>
+                        <button
+                            id="stopRunButton"
+                            class="hidden flex items-center gap-2 bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded-lg transition-colors"
+                            onclick="stopRun()"
+                            title="Stop the running scan or reprocess after the current document"
+                        >
+                            <i class="fas fa-stop"></i>
+                            <span id="stopRunText">Stop</span>
                         </button>
                         <!-- Success message toast -->
                         <div id="successToast" class="hidden fixed top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg transition-opacity">
@@ -159,8 +168,8 @@
                                 </div>
                                 <div class="modal-content">
                                     <p class="mb-2">
-                                        This clears the processing state of <b>every</b> document and analyses them again with the
-                                        current provider chain, prompt and restrictions. Documents are not deleted from Paperless-ngx.
+                                        This analyses <b>every</b> document again with the current provider chain, prompt and
+                                        restrictions. Documents are not deleted from Paperless-ngx. You can stop the run at any time.
                                     </p>
                                     <p class="mb-4 text-sm text-gray-600">
                                         Metadata from the new analysis is written back to Paperless-ngx, so this changes live documents.
@@ -172,7 +181,7 @@
                                     </label>
                                     <label class="flex items-center gap-2 mb-4 text-sm">
                                         <input type="checkbox" id="reprocessDryRun">
-                                        <span>Dry run — only count documents, nothing is reset or written</span>
+                                        <span>Dry run — only count documents, nothing is written</span>
                                     </label>
                                     <div class="flex justify-end gap-4">
                                         <button id="cancelReprocess" class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-100">Cancel</button>
@@ -594,6 +603,22 @@
             setTimeout(() => toast.classList.add('hidden'), 4000);
         }
 
+        async function stopRun() {
+            const button = document.getElementById('stopRunButton');
+            if (button.disabled) return;
+            button.disabled = true;
+            try {
+                const response = await fetch('/api/processing/stop', { method: 'POST' });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(result.error || 'Stopping the run failed');
+                showToast('Stopping after the current document…');
+            } catch (error) {
+                console.error('Stop failed:', error);
+                showToast(error.message, true);
+            }
+            updateProcessingStatus();
+        }
+
         async function runReprocess() {
             const confirmButton = document.getElementById('confirmReprocess');
             // Ignore repeat clicks while the request is in flight.
@@ -724,6 +749,16 @@
                         runButton.classList.toggle('cursor-not-allowed', runActive);
                     }
 
+                    // Stop shows while a run is active; once asked, it waits for
+                    // the current document to finish.
+                    const stopRequested = !!(data.run && data.run.current && data.run.current.stopRequested);
+                    const stopButton = document.getElementById('stopRunButton');
+                    stopButton.classList.toggle('hidden', !runActive);
+                    stopButton.disabled = stopRequested;
+                    stopButton.classList.toggle('opacity-50', stopRequested);
+                    stopButton.classList.toggle('cursor-not-allowed', stopRequested);
+                    document.getElementById('stopRunText').textContent = stopRequested ? 'Stopping…' : 'Stop';
+
                     // Corpus run counters (scan / reprocess-all). Read outside the
                     // per-document branch so progress survives the gaps between documents.
                     const runProgress = document.getElementById('runProgress');
@@ -731,7 +766,8 @@
                     if (run) {
                         runProgress.classList.remove('hidden');
                         document.getElementById('runProgressText').textContent =
-                            `${run.kind === 'reprocess' ? 'Reprocess' : 'Scan'} run: ${run.processed} processed, ${run.skipped} skipped, ${run.failed} failed of ${run.total}`;
+                            `${run.kind === 'reprocess' ? 'Reprocess' : 'Scan'} run${run.stopped ? ' (stopped)' : ''}: ` +
+                            `${run.processed} processed, ${run.skipped} skipped, ${run.failed} failed of ${run.total}`;
                     } else {
                         runProgress.classList.add('hidden');
                     }
