@@ -2737,25 +2737,26 @@ async function processQueue(customPrompt) {
     }
 
     // Same reference lists (as names) as the scan path, from the shared pipeline.
-    const { existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId } =
-      await scanService.collectContext();
-    if (!ownUserId) {
+    let context = await scanService.collectContext();
+    if (!context.ownUserId) {
       console.error('Failed to get own user ID. Abort scanning.');
       return;
     }
 
     while (documentQueue.length > 0) {
       const doc = documentQueue.shift();
-      
+
       try {
         const result = await scanService.processDocument(
-          doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId, customPrompt
+          doc, context.existingTagNames, context.existingCorrespondentList, context.existingDocumentTypesList,
+          context.ownUserId, customPrompt
         );
         if (!result) continue;
 
         const { analysis, originalData } = result;
         const updateData = await scanService.buildUpdateData(analysis, doc);
         await scanService.saveDocumentChanges(doc.id, updateData, analysis, originalData);
+        context = await scanService.refreshContext(context, analysis);
       } catch (error) {
         console.error(`[ERROR] Failed to process document ${doc.id}:`, error);
       }

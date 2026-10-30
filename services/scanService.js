@@ -359,6 +359,31 @@ async function collectContext() {
 }
 
 /**
+ * The context to use for the next document. The lists are read once per run,
+ * so a tag, correspondent or document type the save just created would stay
+ * invisible to the AI for the rest of the run (and, with "use existing data",
+ * every document would invent its own variant). When the analysis named
+ * anything the lists do not have yet, they are read again. A failed refresh
+ * keeps the old lists: the document itself is already saved.
+ */
+async function refreshContext(context, analysis) {
+  const normalize = name => String(name).toLowerCase().trim();
+  const isNew = (name, list) => Boolean(name) && !list.some(known => normalize(known) === normalize(name));
+  const result = (analysis && analysis.document) || {};
+  const namesSomethingNew = (Array.isArray(result.tags) ? result.tags : []).some(tag => isNew(tag, context.existingTagNames))
+    || isNew(result.correspondent, context.existingCorrespondentList)
+    || isNew(result.document_type, context.existingDocumentTypesList);
+  if (!namesSomethingNew) return context;
+
+  try {
+    return await collectContext();
+  } catch (error) {
+    console.error('[ERROR] refreshing tags/correspondents/document types:', error.message);
+    return context;
+  }
+}
+
+/**
  * Run the pipeline over a document list.
  * opts.force re-processes already-processed documents (reprocess-all).
  * opts.dropHistory clears each document's history before it is reprocessed.
@@ -394,8 +419,7 @@ async function runWithHeldLock(documents, opts = {}) {
   currentRun = stats;
 
   try {
-    const { existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId } =
-      await collectContext();
+    let context = await collectContext();
 
     for (const doc of documents) {
       if (stats.stopRequested) {
@@ -413,7 +437,8 @@ async function runWithHeldLock(documents, opts = {}) {
         if (opts.dropHistory) await documentModel.clearHistory(doc.id);
 
         const result = await processDocument(
-          doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId, null, docOpts
+          doc, context.existingTagNames, context.existingCorrespondentList, context.existingDocumentTypesList,
+          context.ownUserId, null, docOpts
         );
         if (!result) {
           stats.skipped++;
@@ -423,6 +448,7 @@ async function runWithHeldLock(documents, opts = {}) {
         const { analysis, originalData } = result;
         const updateData = await buildUpdateData(analysis, doc, docOpts);
         await saveDocumentChanges(doc.id, updateData, analysis, originalData, docOpts);
+        context = await refreshContext(context, analysis);
         stats.processed++;
       } catch (error) {
         stats.failed++;
@@ -467,6 +493,7 @@ module.exports = {
   getRunStatus,
   getLastRun: () => lastRun,
   collectContext,
+  refreshContext,
   REPROCESS_FIELDS,
   taskLock
 };
