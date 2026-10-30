@@ -1878,6 +1878,110 @@
         }
       }
     },
+    "/api/reprocess-all": {
+      "post": {
+        "summary": "Reset and re-process every document",
+        "description": "Clears the processing flags for all documents and runs the full pipeline\nagain, so every document is analysed with the current provider chain,\nprompt and restrictions. Useful after changing the AI model, the provider\nchain or the system prompt.\n\nOnly the processing state is reset — documents themselves are never\ndeleted from Paperless-ngx. Metadata that a re-analysis produces is\nwritten to Paperless-ngx, so this call modifies live documents unless\n`dryRun` is used.\n\nThe run is asynchronous: the endpoint answers immediately with the\nnumber of documents queued, and progress is read from\n`/api/processing-status` (which reports `processed`/`skipped`/`failed`\ncounters for the active run). Documents the Paperless-AI user cannot edit\nand documents without usable content are still skipped, exactly as in a\nnormal scan.\n",
+        "tags": [
+          "Documents",
+          "API"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "keepHistory": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Keep history_documents/original_documents so the History page can still restore original values. Set false for a full wipe."
+                  },
+                  "dryRun": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Count the documents that would be reprocessed without resetting anything or writing to Paperless-ngx."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "description": "Process at most this many documents (useful for a test batch before a full run)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run started (or counted, for a dry run)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "dryRun": {
+                      "type": "boolean"
+                    },
+                    "started": {
+                      "type": "boolean"
+                    },
+                    "totalDocuments": {
+                      "type": "integer"
+                    },
+                    "reset": {
+                      "type": "object",
+                      "description": "Counters removed from the processing tables"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another processing run is already active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/reset-documents": {
       "post": {
         "summary": "Reset specific documents",
@@ -3948,7 +4052,7 @@
     "/api/providers": {
       "get": {
         "summary": "List the provider chain",
-        "description": "Returns the priority-ordered provider chain used for AI calls.\nProviders are stored in data/providers.json; when that file does not\nexist the chain contains a single entry derived from the legacy\nenvironment configuration. Each entry carries the last known health\nstatus from the circuit breaker.\n",
+        "description": "Returns the priority-ordered provider chain used for AI calls.\nProviders are stored in data/providers.json; when that file does not\nexist the chain contains a single entry derived from the legacy\nenvironment configuration. Each entry carries the last known health\nstatus from the circuit breaker. Stored API keys are returned as\n\"********\"; sending that value back on save keeps the stored key.\n",
         "tags": [
           "API",
           "Providers"
@@ -3998,7 +4102,7 @@
       },
       "post": {
         "summary": "Save the provider chain",
-        "description": "Replaces the provider chain with the submitted list. Entries are\nvalidated (provider type must be known) and saved to data/providers.json\nin priority order. The top-priority enabled provider is mirrored into\nthe legacy environment variables for backward compatibility. The health\ncache is cleared on save.\n",
+        "description": "Replaces the provider chain with the submitted list. Entries must have\na known provider type, and at least one enabled provider must answer a\ntest request; the chain is then saved to data/providers.json in\npriority order. An apiKey of \"********\" keeps the stored key for that\nprovider id. The top-priority enabled provider is mirrored into\nthe legacy environment variables for backward compatibility. The health\ncache is cleared on save.\n",
         "tags": [
           "API",
           "Providers"

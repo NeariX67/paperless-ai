@@ -121,11 +121,58 @@
                             <i class="fas fa-sync-alt"></i>
                             <span>Scan Now</span>
                         </button>
+                        <button 
+                            id="reprocessButton"
+                            class="flex items-center gap-2 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg transition-colors"
+                            onclick="showReprocessConfirm()"
+                            title="Reset the processing state of every document and analyse them again with the current provider and prompt"
+                        >
+                            <i class="fas fa-redo"></i>
+                            <span>Reprocess All</span>
+                        </button>
                         <!-- Success message toast -->
                         <div id="successToast" class="hidden fixed top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg transition-opacity">
                             <div class="flex items-center gap-2">
                                 <i class="fas fa-check"></i>
-                                <span>Scan completed successfully!</span>
+                                <span id="successToastText">Scan completed successfully!</span>
+                            </div>
+                        </div>
+                        <div id="errorToast" class="hidden fixed top-4 right-4 bg-red-500 text-white px-4 py-2 rounded-lg shadow-lg transition-opacity">
+                            <div class="flex items-center gap-2">
+                                <i class="fas fa-exclamation-circle"></i>
+                                <span id="errorToastText"></span>
+                            </div>
+                        </div>
+                        <!-- Reprocess confirmation -->
+                        <div id="reprocessModal" class="modal hidden">
+                            <div class="modal-overlay"></div>
+                            <div class="modal-container">
+                                <div class="modal-header">
+                                    <h3 class="modal-title">Reprocess all documents</h3>
+                                    <button class="modal-close"><i class="fas fa-times"></i></button>
+                                </div>
+                                <div class="modal-content">
+                                    <p class="mb-2">
+                                        This clears the processing state of <b>every</b> document and analyses them again with the
+                                        current provider chain, prompt and restrictions. Documents are not deleted from Paperless-ngx.
+                                    </p>
+                                    <p class="mb-4 text-sm text-gray-600">
+                                        Metadata from the new analysis is written back to Paperless-ngx, so this changes live documents.
+                                        A full run can take a long time depending on document count and provider speed.
+                                    </p>
+                                    <label class="flex items-center gap-2 mb-4 text-sm">
+                                        <input type="checkbox" id="reprocessKeepHistory" checked>
+                                        <span>Keep history (allows restoring original values from the History page)</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 mb-4 text-sm">
+                                        <input type="checkbox" id="reprocessDryRun">
+                                        <span>Dry run — only count documents, nothing is reset or written</span>
+                                    </label>
+                                    <div class="flex justify-end gap-4">
+                                        <button id="cancelReprocess" class="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-100">Cancel</button>
+                                        <button id="confirmReprocess" class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600">Confirm Reprocess</button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -291,6 +338,12 @@
                                         <div id="currentDocTitle" class="text-sm text-gray-600 truncate"></div>
                                     </div>
                                 </div>
+                            </div>
+
+                            <!-- Corpus run counters (scan / reprocess-all). Outside the
+                                 per-document block so they also show between documents. -->
+                            <div id="runProgress" class="text-xs text-gray-500 hidden">
+                                <span id="runProgressText"></span>
                             </div>
 
                             <div id="idleContainer" class="flex items-center gap-4">
@@ -513,6 +566,68 @@
         };
     </script>
     <script>
+        function showReprocessConfirm() {
+            const modal = document.getElementById('reprocessModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('show');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function hideReprocessConfirm() {
+            const modal = document.getElementById('reprocessModal');
+            modal.classList.remove('show');
+            modal.classList.add('hidden');
+            document.body.style.overflow = '';
+        }
+
+        function showToast(message, isError) {
+            const toast = document.getElementById(isError ? 'errorToast' : 'successToast');
+            const text = document.getElementById(isError ? 'errorToastText' : 'successToastText');
+            text.textContent = message;
+            toast.classList.remove('hidden');
+            setTimeout(() => toast.classList.add('hidden'), 4000);
+        }
+
+        async function runReprocess() {
+            const confirmButton = document.getElementById('confirmReprocess');
+            // Ignore repeat clicks while the request is in flight.
+            if (confirmButton.disabled) return;
+            confirmButton.disabled = true;
+            confirmButton.classList.add('opacity-50', 'cursor-not-allowed');
+
+            const keepHistory = document.getElementById('reprocessKeepHistory').checked;
+            const dryRun = document.getElementById('reprocessDryRun').checked;
+
+            try {
+                const response = await fetch('/api/reprocess-all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ keepHistory, dryRun })
+                });
+
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || 'Reprocess failed');
+                }
+
+                hideReprocessConfirm();
+
+                if (dryRun) {
+                    showToast(`Dry run: ${result.totalDocuments} documents would be reprocessed. Nothing was changed.`);
+                    return;
+                }
+
+                showToast(`Reprocess started for ${result.totalDocuments} documents. Progress shows in the Task Runner.`);
+                updateProcessingStatus();
+            } catch (error) {
+                console.error('Reprocess failed:', error);
+                showToast(error.message, true);
+            } finally {
+                confirmButton.disabled = false;
+                confirmButton.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
         async function triggerScan() {
             const button = document.getElementById('scanButton');
             
@@ -538,22 +653,18 @@
                     }
                 });
                 
+                const result = await response.json().catch(() => ({}));
                 if (!response.ok) {
-                    throw new Error('Scan failed');
+                    throw new Error(result.error || 'Scan failed');
                 }
-                
-                // Show success message
-                const toast = document.getElementById('successToast');
-                toast.classList.remove('hidden');
-                
-                // Hide success message after 3 seconds
-                setTimeout(() => {
-                    toast.classList.add('hidden');
-                }, 3000);
-                
+
+                // The scan runs in the background; the run counters show progress.
+                showToast(`Scan started for ${result.totalDocuments} documents. Progress shows in the Task Runner.`);
+                updateProcessingStatus();
+
             } catch (error) {
                 console.error('Scan failed:', error);
-                // Optional: Show error message to user
+                showToast(error.message, true);
             } finally {
                 // Reset button state
                 button.disabled = false;
@@ -596,7 +707,29 @@
                     
                     const processingContainer = document.getElementById('processingContainer');
                     const idleContainer = document.getElementById('idleContainer');
-                    
+
+                    // A full run (scan or reprocess) blocks re-triggering; keep both buttons
+                    // disabled so a user cannot start a second corpus run underneath one.
+                    const runActive = !!(data.run && data.run.running);
+                    for (const id of ['reprocessButton', 'scanButton']) {
+                        const runButton = document.getElementById(id);
+                        runButton.disabled = runActive;
+                        runButton.classList.toggle('opacity-50', runActive);
+                        runButton.classList.toggle('cursor-not-allowed', runActive);
+                    }
+
+                    // Corpus run counters (scan / reprocess-all). Read outside the
+                    // per-document branch so progress survives the gaps between documents.
+                    const runProgress = document.getElementById('runProgress');
+                    const run = (data.run && (data.run.current || data.run.last)) || null;
+                    if (run) {
+                        runProgress.classList.remove('hidden');
+                        document.getElementById('runProgressText').textContent =
+                            `${run.kind === 'reprocess' ? 'Reprocess' : 'Scan'} run: ${run.processed} processed, ${run.skipped} skipped, ${run.failed} failed of ${run.total}`;
+                    } else {
+                        runProgress.classList.add('hidden');
+                    }
+
                     if (data.currentlyProcessing) {
                         // Show processing state
                         processingContainer.classList.remove('hidden');
@@ -665,6 +798,15 @@
         }
         document.addEventListener('DOMContentLoaded', function() {
             getStarsCount();
+
+            const modal = document.getElementById('reprocessModal');
+            modal.querySelector('.modal-close').addEventListener('click', hideReprocessConfirm);
+            modal.querySelector('.modal-overlay').addEventListener('click', hideReprocessConfirm);
+            document.getElementById('cancelReprocess').addEventListener('click', hideReprocessConfirm);
+            document.getElementById('confirmReprocess').addEventListener('click', runReprocess);
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && modal.classList.contains('show')) hideReprocessConfirm();
+            });
         });
     </script>
     <script src="js/dashboard.js"></script>

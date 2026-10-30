@@ -10,6 +10,8 @@ const configFile = require('../config/config.js');
 const ChatService = require('../services/chatService.js');
 const documentsService = require('../services/documentsService.js');
 const RAGService = require('../services/ragService.js');
+const scanService = require('../services/scanService.js');
+const taskLock = scanService.taskLock;
 const fs = require('fs').promises;
 const path = require('path');
 const jwt = require('jsonwebtoken');
@@ -1348,6 +1350,155 @@ router.post('/api/reset-all-documents', async (req, res) => {
 
 /**
  * @swagger
+ * /api/reprocess-all:
+ *   post:
+ *     summary: Reset and re-process every document
+ *     description: |
+ *       Clears the processing flags for all documents and runs the full pipeline
+ *       again, so every document is analysed with the current provider chain,
+ *       prompt and restrictions. Useful after changing the AI model, the provider
+ *       chain or the system prompt.
+ *
+ *       Only the processing state is reset — documents themselves are never
+ *       deleted from Paperless-ngx. Metadata that a re-analysis produces is
+ *       written to Paperless-ngx, so this call modifies live documents unless
+ *       `dryRun` is used.
+ *
+ *       The run is asynchronous: the endpoint answers immediately with the
+ *       number of documents queued, and progress is read from
+ *       `/api/processing-status` (which reports `processed`/`skipped`/`failed`
+ *       counters for the active run). Documents the Paperless-AI user cannot edit
+ *       and documents without usable content are still skipped, exactly as in a
+ *       normal scan.
+ *     tags:
+ *       - Documents
+ *       - API
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               keepHistory:
+ *                 type: boolean
+ *                 default: true
+ *                 description: Keep history_documents/original_documents so the History page can still restore original values. Set false for a full wipe.
+ *               dryRun:
+ *                 type: boolean
+ *                 default: false
+ *                 description: Count the documents that would be reprocessed without resetting anything or writing to Paperless-ngx.
+ *               limit:
+ *                 type: integer
+ *                 description: Process at most this many documents (useful for a test batch before a full run). Only these documents are reset; the rest keep their processed state.
+ *     responses:
+ *       200:
+ *         description: Run started (or counted, for a dry run)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 dryRun:
+ *                   type: boolean
+ *                 started:
+ *                   type: boolean
+ *                 totalDocuments:
+ *                   type: integer
+ *                 reset:
+ *                   type: object
+ *                   description: Counters removed from the processing tables
+ *       401:
+ *         description: Unauthorized - authentication required
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Another processing run is already active
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
+router.post('/api/reprocess-all', async (req, res) => {
+  try {
+    const isConfigured = await setupService.isConfigured();
+    if (!isConfigured) {
+      return res.status(400).json({ error: 'Setup not completed. Complete the setup before re-processing documents.' });
+    }
+
+    const { keepHistory = true, dryRun = false, limit = null } = req.body || {};
+    const selectTarget = (documents) => (limit && limit > 0 ? documents.slice(0, limit) : documents);
+
+    if (dryRun) {
+      const documents = await paperlessService.getAllDocuments();
+      return res.json({
+        success: true,
+        dryRun: true,
+        totalDocuments: selectTarget(documents).length,
+        note: 'Nothing was reset or written. Remove dryRun to run the reprocess.'
+      });
+    }
+
+    // Take the lock before resetting anything. Checking isRunning() first and
+    // acquiring later left a window (the slow document fetch) in which the cron
+    // scan or a second click could start a run after the reset had already
+    // cleared the processed flags. The webhook queue holds this lock too.
+    if (!taskLock.tryAcquire()) {
+      return res.status(409).json({ error: 'A processing run is already active' });
+    }
+
+    let handedOff = false;
+    try {
+      const target = selectTarget(await paperlessService.getAllDocuments());
+
+      // Reset only the documents this run covers: clearing every flag would make
+      // the next regular scan reprocess the rest whenever `limit` is set.
+      const reset = await documentModel.resetProcessedDocuments({
+        documentIds: target.map(doc => doc.id),
+        keepHistory
+      });
+      if (!reset) {
+        return res.status(500).json({ error: 'Failed to reset processing records' });
+      }
+
+      // Run without blocking the response; the dashboard polls
+      // /api/processing-status for live counters and the run status.
+      // runWithHeldLock takes over the lock and releases it when done.
+      scanService.runWithHeldLock(target, { force: true, kind: 'reprocess' }).catch(error => {
+        console.error('[ERROR] reprocess run failed:', error.message);
+      });
+      handedOff = true;
+
+      res.json({
+        success: true,
+        started: true,
+        totalDocuments: target.length,
+        reset
+      });
+    } finally {
+      if (!handedOff) taskLock.release();
+    }
+  } catch (error) {
+    console.error('[ERROR] reprocessing all documents:', error);
+    res.status(500).json({ error: error.message || 'Error reprocessing documents' });
+  }
+});
+
+/**
+ * @swagger
  * /api/reset-documents:
  *   post:
  *     summary: Reset specific documents
@@ -1452,6 +1603,9 @@ router.post('/api/reset-documents', async (req, res) => {
  *       - Update documents in Paperless-ngx with generated metadata
  *       
  *       The process respects the function limitations set in the configuration.
+ *
+ *       The call returns as soon as the scan has started; follow its progress
+ *       through /api/processing-status (the `run` object).
  *     tags:
  *       - Documents
  *       - API
@@ -1460,12 +1614,31 @@ router.post('/api/reset-documents', async (req, res) => {
  *       - ApiKeyAuth: []
  *     responses:
  *       200:
- *         description: Scan initiated successfully
+ *         description: Scan started
  *         content:
- *           text/plain:
+ *           application/json:
  *             schema:
- *               type: string
- *               example: "Task completed"
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 started:
+ *                   type: boolean
+ *                 totalDocuments:
+ *                   type: integer
+ *                   description: Number of documents the scan will check
+ *       400:
+ *         description: Setup not completed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: A processing run is already active
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  *       401:
  *         description: Unauthorized - authentication required
  *         content:
@@ -1488,259 +1661,49 @@ router.post('/api/reset-documents', async (req, res) => {
  *                   example: "Error during document scan"
  */
 router.post('/api/scan/now', async (req, res) => {
-try {
+  try {
     const isConfigured = await setupService.isConfigured();
     if (!isConfigured) {
       console.log(`Setup not completed. Visit http://your-machine-ip:${process.env.PAPERLESS_AI_PORT || 3000}/setup to complete setup.`);
-      return;
+      return res.status(400).json({ error: 'Setup not completed. Complete the setup before scanning.' });
     }
 
     const userId = await paperlessService.getOwnUserID();
     if (!userId) {
       console.error('Failed to get own user ID. Abort scanning.');
-      return;
+      return res.status(500).json({ error: 'Failed to get own user ID from Paperless-ngx' });
     }
-    
-      try {
-        let [existingTags, documents, ownUserId, existingCorrespondentList, existingDocumentTypes] = await Promise.all([
-          paperlessService.getTags(),
-          paperlessService.getAllDocuments(),
-          paperlessService.getOwnUserID(),
-          paperlessService.listCorrespondentsNames(),
-          paperlessService.listDocumentTypesNames()
-        ]);
-    
-        //get existing correspondent list
-        existingCorrespondentList = existingCorrespondentList.map(correspondent => correspondent.name);
-        
-        //get existing document types list
-        let existingDocumentTypesList = existingDocumentTypes.map(docType => docType.name);
-        
-        // Extract tag names from tag objects
-        const existingTagNames = existingTags.map(tag => tag.name);
-    
-        for (const doc of documents) {
-          try {
-            const result = await processDocument(doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId);
-            if (!result) continue;
-    
-            const { analysis, originalData } = result;
-            const updateData = await buildUpdateData(analysis, doc);
-            await saveDocumentChanges(doc.id, updateData, analysis, originalData);
-          } catch (error) {
-            console.error(`[ERROR] processing document ${doc.id}:`, error);
-          }
-        }
-      } catch (error) {
-        console.error('[ERROR]  during document scan:', error);
-      } finally {
-        runningTask = false;
-        console.log('[INFO] Task completed');
-        res.send('Task completed');
-      }
+
+    // The lock is shared with the cron scan, reprocess-all and the webhook
+    // queue, so a webhook arriving during the scan cannot process the same
+    // document twice.
+    if (!taskLock.tryAcquire()) {
+      return res.status(409).json({ error: 'A processing run is already active' });
+    }
+
+    let handedOff = false;
+    try {
+      const documents = await paperlessService.getAllDocuments();
+
+      // A full scan can take hours: answer now and let the dashboard follow
+      // the run through /api/processing-status, like reprocess-all.
+      scanService.runWithHeldLock(documents, { kind: 'scan' })
+        .then(stats => console.log(`[INFO] Task completed: processed=${stats.processed}, skipped=${stats.skipped}, failed=${stats.failed}`))
+        .catch(error => console.error('[ERROR] scan run failed:', error.message));
+      handedOff = true;
+
+      res.json({ success: true, started: true, totalDocuments: documents.length });
+    } finally {
+      if (!handedOff) taskLock.release();
+    }
   } catch (error) {
     console.error('[ERROR] in startScanning:', error);
+    res.status(500).json({ error: 'Error during document scan' });
   }
 });
 
-async function processDocument(doc, existingTags, existingCorrespondentList, existingDocumentTypesList, ownUserId, customPrompt = null) {
-  const isProcessed = await documentModel.isDocumentProcessed(doc.id);
-  if (isProcessed) return null;
-  await documentModel.setProcessingStatus(doc.id, doc.title, 'processing');
-
-  const documentEditable = await paperlessService.getPermissionOfDocument(doc.id);
-  if (!documentEditable) {
-    console.log(`[DEBUG] Document belongs to: ${documentEditable}, skipping analysis`);
-    console.log(`[DEBUG] Document ${doc.id} Not Editable by Paper-Ai User, skipping analysis`);
-    return null;
-  }else {
-    console.log(`[DEBUG] Document ${doc.id} rights for AI User - processed`);
-  }
-
-  let [content, originalData] = await Promise.all([
-    paperlessService.getDocumentContent(doc.id),
-    paperlessService.getDocument(doc.id)
-  ]);
-
-  if (!content || !content.length >= 10) {
-    console.log(`[DEBUG] Document ${doc.id} has no content, skipping analysis`);
-    return null;
-  }
-
-  if (content.length > 50000) {
-    content = content.substring(0, 50000);
-  }
-
-  // Prepare options for AI service
-  const options = {
-    restrictToExistingTags: config.restrictToExistingTags === 'yes',
-    restrictToExistingCorrespondents: config.restrictToExistingCorrespondents === 'yes'
-  };
-
-  // Get external API data if enabled
-  if (config.externalApiConfig.enabled === 'yes') {
-    try {
-      const externalApiService = require('../services/externalApiService');
-      const externalData = await externalApiService.fetchData();
-      if (externalData) {
-        options.externalApiData = externalData;
-        console.log('[DEBUG] Retrieved external API data for prompt enrichment');
-      }
-    } catch (error) {
-      console.error('[ERROR] Failed to fetch external API data:', error.message);
-    }
-  }
-
-  let analysis;
-  const runAnalysis = (service) => {
-    return customPrompt
-      ? service.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id, customPrompt, options)
-      : service.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id, null, options);
-  };
-  try {
-    analysis = await AIServiceFactory.execute(runAnalysis);
-  } catch (error) {
-    console.error(`[ERROR] Document analysis failed: ${error.message}`);
-    analysis = { error: error.message };
-  }
-  console.log('Response from AI service:', analysis);
-  if (analysis.error) {
-    throw new Error(`[ERROR] Document analysis failed: ${analysis.error}`);
-  }
-  await documentModel.setProcessingStatus(doc.id, doc.title, 'complete');
-  return { analysis, originalData };
-}
-
-async function buildUpdateData(analysis, doc) {
-  const updateData = {};
-
-  // Create options object with restriction settings
-  const options = {
-    restrictToExistingTags: config.restrictToExistingTags === 'yes' ? true : false,
-    restrictToExistingCorrespondents: config.restrictToExistingCorrespondents === 'yes' ? true : false
-  };
-
-  console.log(`[DEBUG] Building update data with restrictions: tags=${options.restrictToExistingTags}, correspondents=${options.restrictToExistingCorrespondents}`);
-
-  // Only process tags if tagging is activated
-  if (config.limitFunctions?.activateTagging !== 'no') {
-    const { tagIds, errors } = await paperlessService.processTags(analysis.document.tags, options);
-    if (errors.length > 0) {
-      console.warn('[ERROR] Some tags could not be processed:', errors);
-    }
-    updateData.tags = tagIds;
-  } else if (config.limitFunctions?.activateTagging === 'no' && config.addAIProcessedTag === 'yes') {
-    // Add AI processed tags to the document (processTags function awaits a tags array)
-    // get tags from .env file and split them by comma and make an array
-    console.log('[DEBUG] Tagging is deactivated but AI processed tag will be added');
-    const tags = config.addAIProcessedTags.split(',');
-    const { tagIds, errors } = await paperlessService.processTags(tags, options);
-    if (errors.length > 0) {
-      console.warn('[ERROR] Some tags could not be processed:', errors);
-    }
-    updateData.tags = tagIds;
-    console.log('[DEBUG] Tagging is deactivated');
-  }
-
-  // Only process title if title generation is activated
-  if (config.limitFunctions?.activateTitle !== 'no') {
-    updateData.title = analysis.document.title || doc.title;
-  }
-
-  // Add created date regardless of settings as it's a core field
-  updateData.created = analysis.document.document_date || doc.created;
-
-  // Only process document type if document type classification is activated
-  if (config.limitFunctions?.activateDocumentType !== 'no' && analysis.document.document_type) {
-    try {
-      const documentType = await paperlessService.getOrCreateDocumentType(analysis.document.document_type);
-      if (documentType) {
-        updateData.document_type = documentType.id;
-      }
-    } catch (error) {
-      console.error(`[ERROR] Error processing document type:`, error);
-    }
-  }
-
-  // Only process custom fields if custom fields detection is activated
-  if (config.limitFunctions?.activateCustomFields !== 'no' && analysis.document.custom_fields) {
-    const customFields = analysis.document.custom_fields;
-    const processedFields = [];
-
-    // Get existing custom fields
-    const existingFields = await paperlessService.getExistingCustomFields(doc.id);
-    console.log(`[DEBUG] Found existing fields:`, existingFields);
-
-    // Keep track of which fields we've processed to avoid duplicates
-    const processedFieldIds = new Set();
-
-    // First, add any new/updated fields
-    for (const key in customFields) {
-      const customField = customFields[key];
-      
-      if (!customField.field_name || !customField.value?.trim()) {
-        console.log(`[DEBUG] Skipping empty/invalid custom field`);
-        continue;
-      }
-
-      const fieldDetails = await paperlessService.findExistingCustomField(customField.field_name);
-      if (fieldDetails?.id) {
-        processedFields.push({
-          field: fieldDetails.id,
-          value: customField.value.trim()
-        });
-        processedFieldIds.add(fieldDetails.id);
-      }
-    }
-
-    // Then add any existing fields that weren't updated
-    for (const existingField of existingFields) {
-      if (!processedFieldIds.has(existingField.field)) {
-        processedFields.push(existingField);
-      }
-    }
-
-    if (processedFields.length > 0) {
-      updateData.custom_fields = processedFields;
-    }
-  }
-
-  // Only process correspondent if correspondent detection is activated
-  if (config.limitFunctions?.activateCorrespondents !== 'no' && analysis.document.correspondent) {
-    try {
-      const correspondent = await paperlessService.getOrCreateCorrespondent(analysis.document.correspondent, options);
-      if (correspondent) {
-        updateData.correspondent = correspondent.id;
-      }
-    } catch (error) {
-      console.error(`[ERROR] Error processing correspondent:`, error);
-    }
-  }
-
-  // Always include language if provided as it's a core field
-  if (analysis.document.language) {
-    updateData.language = analysis.document.language;
-  }
-
-  return updateData;
-}
-
-async function saveDocumentChanges(docId, updateData, analysis, originalData) {
-  const { tags: originalTags, correspondent: originalCorrespondent, title: originalTitle } = originalData;
-  
-  await Promise.all([
-    documentModel.saveOriginalData(docId, originalTags, originalCorrespondent, originalTitle),
-    paperlessService.updateDocument(docId, updateData),
-    documentModel.addProcessedDocument(docId, updateData.title),
-    documentModel.addOpenAIMetrics(
-      docId, 
-      analysis.metrics.promptTokens,
-      analysis.metrics.completionTokens,
-      analysis.metrics.totalTokens
-    ),
-    documentModel.addToHistory(docId, updateData.tags, updateData.title, analysis.document.correspondent)
-  ]);
-}
+// Pipeline functions live in services/scanService.js (single shared implementation,
+// required at the top of this file).
 
 /**
  * @swagger
@@ -2350,9 +2313,22 @@ async function processQueue(customPrompt) {
   }
 
   if (isProcessing || documentQueue.length === 0) return;
-  
+
+  // Wait for the shared lock: a full scan/reprocess run walks the same corpus,
+  // and the webhook queue must not process a document underneath it.
+  while (!taskLock.tryAcquire()) {
+    await taskLock.waitUntilFree();
+  }
+
+  // Several webhooks can wait for the same run; the first one to get the lock
+  // drains the whole queue, so a later one may find nothing left to do.
+  if (documentQueue.length === 0) {
+    taskLock.release();
+    return;
+  }
+
   isProcessing = true;
-  
+
   try {
     const isConfigured = await setupService.isConfigured();
     if (!isConfigured) {
@@ -2360,31 +2336,26 @@ async function processQueue(customPrompt) {
       return;
     }
 
-    const userId = await paperlessService.getOwnUserID();
-    if (!userId) {
+    // Same reference lists (as names) as the scan path, from the shared pipeline.
+    const { existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId } =
+      await scanService.collectContext();
+    if (!ownUserId) {
       console.error('Failed to get own user ID. Abort scanning.');
       return;
     }
-
-    const [existingTags, existingCorrespondentList, existingDocumentTypes, ownUserId] = await Promise.all([
-      paperlessService.getTags(),
-      paperlessService.listCorrespondentsNames(),
-      paperlessService.listDocumentTypesNames(),
-      paperlessService.getOwnUserID()
-    ]);
-
-    const existingDocumentTypesList = existingDocumentTypes.map(docType => docType.name);
 
     while (documentQueue.length > 0) {
       const doc = documentQueue.shift();
       
       try {
-        const result = await processDocument(doc, existingTags, existingCorrespondentList, existingDocumentTypesList, ownUserId, customPrompt);
+        const result = await scanService.processDocument(
+          doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId, customPrompt
+        );
         if (!result) continue;
 
         const { analysis, originalData } = result;
-        const updateData = await buildUpdateData(analysis, doc);
-        await saveDocumentChanges(doc.id, updateData, analysis, originalData);
+        const updateData = await scanService.buildUpdateData(analysis, doc);
+        await scanService.saveDocumentChanges(doc.id, updateData, analysis, originalData);
       } catch (error) {
         console.error(`[ERROR] Failed to process document ${doc.id}:`, error);
       }
@@ -2393,6 +2364,7 @@ async function processQueue(customPrompt) {
     console.error('[ERROR] Error during queue processing:', error);
   } finally {
     isProcessing = false;
+    taskLock.release();
     
     if (documentQueue.length > 0) {
       processQueue();
@@ -2509,12 +2481,16 @@ router.post('/api/webhook/document', async (req, res) => {
       }
       
       documentQueue.push(document);
+      // Don't await: processQueue waits for the shared task lock, which a full
+      // scan or reprocess run can hold for hours. The document is queued, so
+      // answer 202 now instead of holding the webhook request open.
+      const onQueueError = error => console.error('[ERROR] webhook queue processing failed:', error);
       if (prompt) {
         usePrompt = true;
         console.log('[DEBUG] Using custom prompt:', prompt);
-        await processQueue(prompt);
+        processQueue(prompt).catch(onQueueError);
       } else {
-        await processQueue();
+        processQueue().catch(onQueueError);
       }
       
       
@@ -4327,7 +4303,10 @@ router.post('/settings', express.json(), async (req, res) => {
 router.get('/api/processing-status', async (req, res) => {
   try {
       const status = await documentModel.getCurrentProcessingStatus();
-      res.json(status);
+      // Run counters for the active/last run (a full scan or reprocess-all):
+      // the per-document status table only shows the current document, so the
+      // UI needs these to show progress over a whole corpus.
+      res.json({ ...status, run: scanService.getRunStatus() });
   } catch (error) {
       res.status(500).json({ error: 'Failed to fetch processing status' });
   }

@@ -4,7 +4,6 @@ const path = require('path');
 const fs = require('fs').promises;
 const config = require('./config/config');
 const paperlessService = require('./services/paperlessService');
-const AIServiceFactory = require('./services/aiServiceFactory');
 const documentModel = require('./models/document');
 const setupService = require('./services/setupService');
 const setupRoutes = require('./routes/setup');
@@ -34,7 +33,6 @@ const txtLogger = new Logger({
 });
 
 const app = express();
-let runningTask = false;
 
 
 const corsOptions = {
@@ -180,173 +178,10 @@ async function saveOpenApiSpec() {
   }
 }
 
-// Document processing functions
-async function processDocument(doc, existingTags, existingCorrespondentList, existingDocumentTypesList, ownUserId) {
-  const isProcessed = await documentModel.isDocumentProcessed(doc.id);
-  if (isProcessed) return null;
-  await documentModel.setProcessingStatus(doc.id, doc.title, 'processing');
+// Document processing pipeline (shared with the routes via services/scanService)
+const scanService = require('./services/scanService');
+const taskLock = scanService.taskLock;
 
-  //Check if the Document can be edited
-  const documentEditable = await paperlessService.getPermissionOfDocument(doc.id);
-  if (!documentEditable) {
-    console.log(`[DEBUG] Document belongs to: ${documentEditable}, skipping analysis`);
-    console.log(`[DEBUG] Document ${doc.id} Not Editable by Paper-Ai User, skipping analysis`);
-    return null;
-  }else {
-    console.log(`[DEBUG] Document ${doc.id} rights for AI User - processed`);
-  }
-
-  let [content, originalData] = await Promise.all([
-    paperlessService.getDocumentContent(doc.id),
-    paperlessService.getDocument(doc.id)
-  ]);
-
-  if (!content || !content.length >= 10) {
-    console.log(`[DEBUG] Document ${doc.id} has no content, skipping analysis`);
-    return null;
-  }
-
-  if (content.length > 50000) {
-    content = content.substring(0, 50000);
-  }
-
-  const analysis = await AIServiceFactory.execute(service =>
-    service.analyzeDocument(content, existingTags, existingCorrespondentList, existingDocumentTypesList, doc.id)
-  );
-  console.log('Repsonse from AI service:', analysis);
-  if (analysis.error) {
-    throw new Error(`[ERROR] Document analysis failed: ${analysis.error}`);
-  }
-  await documentModel.setProcessingStatus(doc.id, doc.title, 'complete');
-  return { analysis, originalData };
-}
-
-async function buildUpdateData(analysis, doc) {
-  const updateData = {};
-
-  console.log('TEST: ', config.addAIProcessedTag)
-  console.log('TEST 2: ', config.addAIProcessedTags)
-  // Only process tags if tagging is activated
-  if (config.limitFunctions?.activateTagging !== 'no') {
-    const { tagIds, errors } = await paperlessService.processTags(analysis.document.tags);
-    if (errors.length > 0) {
-      console.warn('[ERROR] Some tags could not be processed:', errors);
-    }
-    updateData.tags = tagIds;
-  } else if (config.limitFunctions?.activateTagging === 'no' && config.addAIProcessedTag === 'yes') {
-    // Add AI processed tags to the document (processTags function awaits a tags array)
-    // get tags from .env file and split them by comma and make an array
-    console.log('[DEBUG] Tagging is deactivated but AI processed tag will be added');
-    const tags = config.addAIProcessedTags.split(',');
-    const { tagIds, errors } = await paperlessService.processTags(tags);
-    if (errors.length > 0) {
-      console.warn('[ERROR] Some tags could not be processed:', errors);
-    }
-    updateData.tags = tagIds;
-    console.log('[DEBUG] Tagging is deactivated');
-  }
-
-  // Only process title if title generation is activated
-  if (config.limitFunctions?.activateTitle !== 'no') {
-    updateData.title = analysis.document.title || doc.title;
-  }
-
-  // Add created date regardless of settings as it's a core field
-  updateData.created = analysis.document.document_date || doc.created;
-
-  // Only process document type if document type classification is activated
-  if (config.limitFunctions?.activateDocumentType !== 'no' && analysis.document.document_type) {
-    try {
-      const documentType = await paperlessService.getOrCreateDocumentType(analysis.document.document_type);
-      if (documentType) {
-        updateData.document_type = documentType.id;
-      }
-    } catch (error) {
-      console.error(`[ERROR] Error processing document type:`, error);
-    }
-  }
-  
-  // Only process custom fields if custom fields detection is activated
-  if (config.limitFunctions?.activateCustomFields !== 'no' && analysis.document.custom_fields) {
-    const customFields = analysis.document.custom_fields;
-    const processedFields = [];
-
-    // Get existing custom fields
-    const existingFields = await paperlessService.getExistingCustomFields(doc.id);
-    console.log(`[DEBUG] Found existing fields:`, existingFields);
-
-    // Keep track of which fields we've processed to avoid duplicates
-    const processedFieldIds = new Set();
-
-    // First, add any new/updated fields
-    for (const key in customFields) {
-      const customField = customFields[key];
-      
-      if (!customField.field_name || !customField.value?.trim()) {
-        console.log(`[DEBUG] Skipping empty/invalid custom field`);
-        continue;
-      }
-
-      const fieldDetails = await paperlessService.findExistingCustomField(customField.field_name);
-      if (fieldDetails?.id) {
-        processedFields.push({
-          field: fieldDetails.id,
-          value: customField.value.trim()
-        });
-        processedFieldIds.add(fieldDetails.id);
-      }
-    }
-
-    // Then add any existing fields that weren't updated
-    for (const existingField of existingFields) {
-      if (!processedFieldIds.has(existingField.field)) {
-        processedFields.push(existingField);
-      }
-    }
-
-    if (processedFields.length > 0) {
-      updateData.custom_fields = processedFields;
-    }
-  }
-
-  // Only process correspondent if correspondent detection is activated
-  if (config.limitFunctions?.activateCorrespondents !== 'no' && analysis.document.correspondent) {
-    try {
-      const correspondent = await paperlessService.getOrCreateCorrespondent(analysis.document.correspondent);
-      if (correspondent) {
-        updateData.correspondent = correspondent.id;
-      }
-    } catch (error) {
-      console.error(`[ERROR] Error processing correspondent:`, error);
-    }
-  }
-
-  // Always include language if provided as it's a core field
-  if (analysis.document.language) {
-    updateData.language = analysis.document.language;
-  }
-
-  return updateData;
-}
-
-async function saveDocumentChanges(docId, updateData, analysis, originalData) {
-  const { tags: originalTags, correspondent: originalCorrespondent, title: originalTitle } = originalData;
-  
-  await Promise.all([
-    documentModel.saveOriginalData(docId, originalTags, originalCorrespondent, originalTitle),
-    paperlessService.updateDocument(docId, updateData),
-    documentModel.addProcessedDocument(docId, updateData.title),
-    documentModel.addOpenAIMetrics(
-      docId, 
-      analysis.metrics.promptTokens,
-      analysis.metrics.completionTokens,
-      analysis.metrics.totalTokens
-    ),
-    documentModel.addToHistory(docId, updateData.tags, updateData.title, analysis.document.correspondent)
-  ]);
-}
-
-// Main scanning functions
 async function scanInitial() {
   try {
     const isConfigured = await setupService.isConfigured();
@@ -355,79 +190,27 @@ async function scanInitial() {
       return;
     }
 
-    let [existingTags, documents, ownUserId, existingCorrespondentList, existingDocumentTypes] = await Promise.all([
-      paperlessService.getTags(),
-      paperlessService.getAllDocuments(),
-      paperlessService.getOwnUserID(),
-      paperlessService.listCorrespondentsNames(),
-      paperlessService.listDocumentTypesNames()
-    ]);
-    //get existing correspondent list
-    existingCorrespondentList = existingCorrespondentList.map(correspondent => correspondent.name);
-    let existingDocumentTypesList = existingDocumentTypes.map(docType => docType.name);
-    
-    // Extract tag names from tag objects
-    const existingTagNames = existingTags.map(tag => tag.name);
-
-    for (const doc of documents) {
-      try {
-        const result = await processDocument(doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId);
-        if (!result) continue;
-
-        const { analysis, originalData } = result;
-        const updateData = await buildUpdateData(analysis, doc);
-        await saveDocumentChanges(doc.id, updateData, analysis, originalData);
-      } catch (error) {
-        console.error(`[ERROR] processing document ${doc.id}:`, error);
-      }
-    }
+    const documents = await paperlessService.getAllDocuments();
+    const stats = await scanService.scanAll(documents);
+    console.log(`[INFO] Initial scan finished: processed=${stats.processed}, skipped=${stats.skipped}, failed=${stats.failed}`);
   } catch (error) {
     console.error('[ERROR] during initial document scan:', error);
   }
 }
 
 async function scanDocuments() {
-  if (runningTask) {
+  if (taskLock.isRunning()) {
     console.log('[DEBUG] Task already running');
     return;
   }
 
-  runningTask = true;
   try {
-    let [existingTags, documents, ownUserId, existingCorrespondentList, existingDocumentTypes] = await Promise.all([
-      paperlessService.getTags(),
-      paperlessService.getAllDocuments(),
-      paperlessService.getOwnUserID(),
-      paperlessService.listCorrespondentsNames(),
-      paperlessService.listDocumentTypesNames()
-    ]);
-
-    //get existing correspondent list
-    existingCorrespondentList = existingCorrespondentList.map(correspondent => correspondent.name);
-    
-    //get existing document types list
-    let existingDocumentTypesList = existingDocumentTypes.map(docType => docType.name);
-    
-    // Extract tag names from tag objects
-    const existingTagNames = existingTags.map(tag => tag.name);
-
-    for (const doc of documents) {
-      try {
-        const result = await processDocument(doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId);
-        if (!result) continue;
-
-        const { analysis, originalData } = result;
-        const updateData = await buildUpdateData(analysis, doc);
-        await saveDocumentChanges(doc.id, updateData, analysis, originalData);
-      } catch (error) {
-        console.error(`[ERROR] processing document ${doc.id}:`, error);
-      }
-    }
+    const documents = await paperlessService.getAllDocuments();
+    // scanAll() takes the shared lock itself, so the caller must not wrap it.
+    const stats = await scanService.scanAll(documents);
+    console.log(`[INFO] Scheduled scan finished: processed=${stats.processed}, skipped=${stats.skipped}, failed=${stats.failed}`);
   } catch (error) {
-    console.error('[ERROR]  during document scan:', error);
-  } finally {
-    runningTask = false;
-    console.log('[INFO] Task completed');
+    console.error('[ERROR] during document scan:', error);
   }
 }
 

@@ -61,10 +61,10 @@ class CustomOpenAIService {
 
         if (!thumbnailData) {
           console.warn('Thumbnail nicht gefunden');
+        } else {
+          await fs.mkdir(path.dirname(cachePath), { recursive: true });
+          await fs.writeFile(cachePath, thumbnailData);
         }
-
-        await fs.mkdir(path.dirname(cachePath), { recursive: true });
-        await fs.writeFile(cachePath, thumbnailData);
       }
 
       // Format existing tags
@@ -166,7 +166,7 @@ class CustomOpenAIService {
       const availableTokens = maxTokens - reservedTokens;
 
       // Validate that we have positive available tokens
-      if (availableTokens <= 0) {
+      if (Number(config.tokenLimit) > 0 && availableTokens <= 0) {
         console.warn(`[WARNING] No available tokens for content. Reserved: ${reservedTokens}, Max: ${maxTokens}`);
         throw new Error('Token limit exceeded: prompt too large for available token limit');
       }

@@ -95,6 +95,10 @@ async function calculateTotalPromptTokens(systemPrompt, additionalPrompts = [], 
 // Truncate text to fit within token limit
 async function truncateToTokenLimit(text, maxTokens, model = process.env.OPENAI_MODEL || "gpt-4o-mini") {
     try {
+        // TOKEN_LIMIT = 0 means no budget configured: pass the content through
+        // unchanged instead of computing a negative allowance.
+        if (!maxTokens || maxTokens <= 0) return text;
+
         const compatibleModel = getCompatibleModel(model);
         
         if (!compatibleModel) {

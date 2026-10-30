@@ -223,14 +223,19 @@ module.exports = {
   async saveOriginalData(documentId, tags, correspondent, title) {
     try {
       const tagsString = JSON.stringify(tags); // Konvertiere Array zu String
+      // Keep only the first snapshot: when a document is processed again
+      // (reprocess-all), its current metadata is already the AI's output, and
+      // saving it would replace the real originals the History page restores.
       const result = db.prepare(`
         INSERT INTO original_documents (document_id, title, tags, correspondent)
-        VALUES (?, ?, ?, ?)
-      `).run(documentId, title, tagsString, correspondent);
+        SELECT ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM original_documents WHERE document_id = ?)
+      `).run(documentId, title, tagsString, correspondent, documentId);
       if (result.changes > 0) {
         console.log(`[DEBUG] Original data for document ${title} saved`);
         return true;
       }
+      console.log(`[DEBUG] Original data for document ${title} already stored, kept`);
       return false;
     } catch (error) {
       console.error('[ERROR] saving original data:', error);
@@ -241,10 +246,15 @@ module.exports = {
   async addToHistory(documentId, tagIds, title, correspondent) {
     try {
       const tagIdsString = JSON.stringify(tagIds); // Konvertiere Array zu String
-      const result = db.prepare(`
-        INSERT INTO history_documents (document_id, tags, title, correspondent)
-        VALUES (?, ?, ?, ?)
-      `).run(documentId, tagIdsString, title, correspondent);
+      // One history row per document: replace the previous run's row so a
+      // reprocessed document is not listed twice on the History page.
+      const result = db.transaction(() => {
+        db.prepare('DELETE FROM history_documents WHERE document_id = ?').run(documentId);
+        return db.prepare(`
+          INSERT INTO history_documents (document_id, tags, title, correspondent)
+          VALUES (?, ?, ?, ?)
+        `).run(documentId, tagIdsString, title, correspondent);
+      })();
       if (result.changes > 0) {
         console.log(`[DEBUG] Document ${title} added to history`);
         return true;
@@ -261,7 +271,7 @@ module.exports = {
     if (id) {
       try {
         //only one document with id exists
-        return db.prepare('SELECT * FROM history_documents WHERE document_id = ?').get(id);
+        return db.prepare('SELECT * FROM history_documents WHERE document_id = ? ORDER BY id DESC').get(id);
       } catch (error) {
         console.error('[ERROR] getting history for id:', id, error);
         return [];
@@ -281,7 +291,7 @@ module.exports = {
     if (id) {
       try {
         //only one document with id exists
-        return db.prepare('SELECT * FROM original_documents WHERE document_id = ?').get(id);
+        return db.prepare('SELECT * FROM original_documents WHERE document_id = ? ORDER BY id ASC').get(id);
       } catch (error) {
         console.error('[ERROR] getting original data for id:', id, error);
         return [];
@@ -345,6 +355,50 @@ module.exports = {
     } catch (error) {
       console.error('[ERROR] deleting documents:', error);
       return false;
+    }
+  },
+
+  /**
+   * Reset the processing state so documents are analysed again.
+   * `processed_documents` is the flag that makes the pipeline skip a document,
+   * so removing it is what enables a reprocess run. `processing_status` is the
+   * live progress table and is cleared with it.
+   *
+   * `keepHistory` (default true) leaves history_documents and original_documents
+   * intact — that is the data the History page uses to restore a document to its
+   * original values. A full wipe would silently destroy the undo data, so it has
+   * to be requested explicitly.
+   *
+   * `documentIds` limits the reset to those documents; documents outside the
+   * list keep their processed flag, so a limited run does not make the next
+   * regular scan reprocess everything else. All deletes run in one transaction.
+   */
+  async resetProcessedDocuments({ documentIds, keepHistory = true } = {}) {
+    try {
+      const tables = keepHistory
+        ? ['processed_documents', 'processing_status']
+        : ['processed_documents', 'processing_status', 'history_documents', 'original_documents'];
+      const deletes = tables.map(table => db.prepare(`DELETE FROM ${table} WHERE document_id = ?`));
+
+      const removed = db.transaction((ids) => {
+        const counts = tables.map(() => 0);
+        for (const id of ids) {
+          deletes.forEach((stmt, i) => { counts[i] += stmt.run(id).changes; });
+        }
+        return counts;
+      })(documentIds || []);
+
+      const processedRemoved = removed[0];
+      const historyRemoved = keepHistory ? 0 : removed[2];
+      console.log(`[DEBUG] processed_documents reset: ${processedRemoved} records`);
+      if (!keepHistory) {
+        console.log(`[DEBUG] history/original records removed: ${removed[2]}/${removed[3]}`);
+      }
+
+      return { processedRemoved, historyRemoved, keepHistory };
+    } catch (error) {
+      console.error('[ERROR] resetting processed documents:', error);
+      return null;
     }
   },
 
