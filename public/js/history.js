@@ -68,12 +68,9 @@ class HistoryManager {
                 },
                 {
                     data: 'title',
-                    render: (data, type, row) => {
+                    render: (data, type) => {
                         if (type === 'display') {
-                            return `
-                                <div class="font-medium">${data}</div>
-                                <div class="text-xs text-gray-500">Modified: ${new Date(row.created_at).toLocaleString()}</div>
-                            `;
+                            return `<div class="font-medium">${data}</div>`;
                         }
                         return data;
                     }
@@ -92,6 +89,18 @@ class HistoryManager {
                 },
                 { data: 'correspondent' },
                 {
+                    // ISO UTC timestamp from the API, shown in the viewer's local time.
+                    // Sorting happens server-side on the timestamp itself.
+                    data: 'created_at',
+                    className: 'whitespace-nowrap',
+                    render: (data, type) => {
+                        if (type !== 'display') return data;
+                        const date = data ? new Date(data) : null;
+                        if (!date || isNaN(date)) return '<span class="text-gray-400 text-sm">Unknown</span>';
+                        return `<span title="${date.toISOString()}">${date.toLocaleString()}</span>`;
+                    }
+                },
+                {
                     data: null,
                     render: (data) => `
                         <div class="flex space-x-2">
@@ -109,7 +118,8 @@ class HistoryManager {
                     width: '150px'
                 }
             ],
-            order: [[2, 'desc']],
+            // Newest first: column 5 is the Time column.
+            order: [[5, 'desc']],
             pageLength: 10,
             dom: '<"flex flex-col sm:flex-row justify-between items-center mb-4"<"flex-1"f><"flex-none"l>>rtip',
             language: {

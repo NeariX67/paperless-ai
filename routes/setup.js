@@ -1117,7 +1117,10 @@ router.get('/history', async (req, res) => {
  *         name: order[0][column]
  *         schema:
  *           type: integer
- *         description: Index of column to sort by (0=document_id, 1=title, etc.)
+ *         description: |
+ *           Index into the DataTables `columns` parameter of the column to sort by;
+ *           that column's `data` value (document_id, title, tags, correspondent or
+ *           created_at) decides the sort. created_at sorts by processing time.
  *         example: 1
  *       - in: query
  *         name: order[0][dir]
@@ -1162,7 +1165,7 @@ router.get('/history', async (req, res) => {
  *                       created_at:
  *                         type: string
  *                         format: date-time
- *                         description: Date and time when the processing occurred
+ *                         description: Date and time (UTC, ISO 8601) when the document was last processed
  *                         example: "2023-07-15T14:30:45Z"
  *                       tags:
  *                         type: array
@@ -1207,6 +1210,18 @@ router.get('/history', async (req, res) => {
  *                   type: string
  *                   example: "Error loading history data"
  */
+/**
+ * SQLite's CURRENT_TIMESTAMP is UTC but has no zone marker
+ * ("2026-10-29 21:58:27"), so browsers parse it as local time (or reject it).
+ * Return it as ISO 8601 UTC ("2026-10-29T21:58:27Z").
+ */
+function sqliteUtcToIso(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) {
+    return `${value.replace(' ', 'T')}Z`;
+  }
+  return value || null;
+}
+
 router.get('/api/history', async (req, res) => {
   try {
     const draw = parseInt(req.query.draw);
@@ -1232,7 +1247,7 @@ router.get('/api/history', async (req, res) => {
       return {
         document_id: doc.document_id,
         title: doc.title || 'Modified: Invalid Date',
-        created_at: doc.created_at,
+        created_at: sqliteUtcToIso(doc.created_at),
         tags: resolvedTags,
         correspondent: doc.correspondent || 'Not assigned',
         link: `${baseURL}/documents/${doc.document_id}/`
@@ -1259,7 +1274,8 @@ router.get('/api/history', async (req, res) => {
         if (a[column] == null) return 1;
         if (b[column] == null) return -1;
         if (column === 'created_at') {
-          return dir * (new Date(a[column]) - new Date(b[column]));
+          // ISO UTC strings, so string order is time order.
+          return dir * a[column].localeCompare(b[column]);
         }
         if (column === 'document_id') {
           return dir * (a[column] - b[column]);
