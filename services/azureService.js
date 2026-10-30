@@ -117,11 +117,14 @@ class AzureOpenAIService {
 
       // Get system prompt and model
       if (config.useExistingData === 'yes' && config.restrictToExistingTags === 'no' && config.restrictToExistingCorrespondents === 'no') {
-        systemPrompt = `
-        Pre-existing tags: ${existingTagsList}\n\n
-        Pre-existing correspondents: ${existingCorrespondentList}\n\n
+        // Fixed instructions first, lists last (least to most changing): the
+        // lists grow as documents create tags, and a model's prompt cache only
+        // reuses the prompt up to the first change.
+        systemPrompt = process.env.SYSTEM_PROMPT + '\n\n' + config.mustHavePrompt.replace('%CUSTOMFIELDS%', customFieldsStr) + `\n\n
         Pre-existing document types: ${existingDocumentTypesList.join(', ')}\n\n
-        ` + process.env.SYSTEM_PROMPT + '\n\n' + config.mustHavePrompt.replace('%CUSTOMFIELDS%', customFieldsStr);
+        Pre-existing correspondents: ${existingCorrespondentList}\n\n
+        Pre-existing tags: ${existingTagsList}\n\n
+        `;
         promptTags = '';
       } else {
         config.mustHavePrompt = config.mustHavePrompt.replace('%CUSTOMFIELDS%', customFieldsStr);

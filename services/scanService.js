@@ -350,10 +350,15 @@ async function collectContext() {
     paperlessService.listDocumentTypesNames()
   ]);
 
+  // Creation order (by id), not alphabetical: a newly created entry lands at
+  // the end of its list, so the prompt before it stays the same and the
+  // model's prompt cache can still reuse it.
+  const names = list => [...list].sort((a, b) => a.id - b.id).map(item => item.name);
+
   return {
-    existingTagNames: existingTags.map(tag => tag.name),
-    existingCorrespondentList: existingCorrespondents.map(c => c.name),
-    existingDocumentTypesList: existingDocumentTypes.map(dt => dt.name),
+    existingTagNames: names(existingTags),
+    existingCorrespondentList: names(existingCorrespondents),
+    existingDocumentTypesList: names(existingDocumentTypes),
     ownUserId
   };
 }
