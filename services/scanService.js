@@ -294,25 +294,33 @@ async function previousAiTagIds(docId) {
 async function saveDocumentChanges(docId, updateData, analysis, originalData, opts = {}) {
   const { tags: originalTags, correspondent: originalCorrespondent, title: originalTitle } = originalData;
 
-  // Regular scans only add tags and keep an existing correspondent. A field
-  // reprocess replaces the previous AI tags and the correspondent, and keeps
-  // the history row's values for fields it did not touch.
-  let updateOptions = {};
+  // Regular scans only add tags and keep an existing correspondent. A
+  // reprocess (opts.force) that writes tags replaces the tags the previous AI
+  // run added; a field reprocess also replaces the correspondent, and keeps the
+  // history row's values for fields it did not touch.
+  const replacesTags = opts.fields ? opts.fields.includes('tags') : Boolean(opts.force && updateData.tags);
+  const removeTagIds = replacesTags ? (opts.previousAiTags || await previousAiTagIds(docId)) : [];
+  const updateOptions = {
+    overwriteCorrespondent: Boolean(opts.fields && opts.fields.includes('correspondent')),
+    removeTagIds
+  };
   let historyTags = updateData.tags;
   let historyCorrespondent = analysis.document.correspondent;
   if (opts.fields) {
     const previous = await documentModel.getHistory(docId);
-    updateOptions = {
-      overwriteCorrespondent: opts.fields.includes('correspondent'),
-      removeTagIds: opts.fields.includes('tags') ? await previousAiTagIds(docId) : []
-    };
     if (!opts.fields.includes('tags')) historyTags = parseTagIds(previous && previous.tags);
     if (!opts.fields.includes('correspondent')) historyCorrespondent = previous ? previous.correspondent : null;
   }
   const title = updateData.title || originalTitle;
 
+  // The original snapshot is only written when none exists (first processing,
+  // or after dropHistory). Leave out the AI tags being replaced, so a snapshot
+  // taken after the history was dropped still tells them apart from the
+  // document's own tags.
+  const snapshotTags = (originalTags || []).filter(id => !removeTagIds.includes(id));
+
   await Promise.all([
-    documentModel.saveOriginalData(docId, originalTags, originalCorrespondent, originalTitle),
+    documentModel.saveOriginalData(docId, snapshotTags, originalCorrespondent, originalTitle),
     paperlessService.updateDocument(docId, { ...updateData }, updateOptions),
     documentModel.addProcessedDocument(docId, title),
     // Ollama and some providers report no token usage (metrics: null), so only
@@ -395,13 +403,17 @@ async function runWithHeldLock(documents, opts = {}) {
         break;
       }
       try {
+        // A reprocess replaces the tags the previous run added: read which
+        // those are before dropHistory forgets them.
+        const docOpts = opts.force ? { ...opts, previousAiTags: await previousAiTagIds(doc.id) } : opts;
+
         // Reprocess without history: forget this document's history right
         // before analysing it again (not for the whole list up front), so a
         // stopped run leaves the documents it did not reach untouched.
         if (opts.dropHistory) await documentModel.clearHistory(doc.id);
 
         const result = await processDocument(
-          doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId, null, opts
+          doc, existingTagNames, existingCorrespondentList, existingDocumentTypesList, ownUserId, null, docOpts
         );
         if (!result) {
           stats.skipped++;
@@ -409,8 +421,8 @@ async function runWithHeldLock(documents, opts = {}) {
         }
 
         const { analysis, originalData } = result;
-        const updateData = await buildUpdateData(analysis, doc, opts);
-        await saveDocumentChanges(doc.id, updateData, analysis, originalData, opts);
+        const updateData = await buildUpdateData(analysis, doc, docOpts);
+        await saveDocumentChanges(doc.id, updateData, analysis, originalData, docOpts);
         stats.processed++;
       } catch (error) {
         stats.failed++;
